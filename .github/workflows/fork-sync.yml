@@ -1,18 +1,19 @@
 name: Sync Fork
 
 on:
-  schedule:
-    - cron: "* * * * *" # every hour
-  workflow_dispatch: # on button click
+    schedule:
+        - cron: "0 */6 * * *" # every hour
+    workflow_dispatch: # on button click
 
 jobs:
-  sync:
-    runs-on: ubuntu-latest
+    sync:
+        runs-on: ubuntu-latest
 
-    steps:
-      - uses: tgymnich/fork-sync@v1.4
-        with:
-          owner: bram2w
-          token: ${{ secrets.PERSONAL_TOKEN }}
-          base: master
-          head: master
+        steps:
+            - uses: tgymnich/fork-sync@v1.4
+              with:
+                  owner: bram2w
+                  auto_approve: true
+                  token: ${{ secrets.PERSONAL_TOKEN }}
+                  base: master
+                  head: master
