@@ -1,14 +1,35 @@
 <template functional>
+  <!--
+    The :key property must be set here because it makes sure that the child components
+    are not re-rendered when functional component changes position in the DOM.
+  -->
   <div
+    :key="
+      'row-field-cell-' +
+      props.row._.persistentId +
+      '-' +
+      props.field.id.toString()
+    "
     ref="wrapper"
     class="grid-view__column"
     :class="{
       'grid-view__column--matches-search':
         props.row._.matchSearch &&
         props.row._.fieldSearchMatches.includes(props.field.id.toString()),
+      'grid-view__column--multi-select': props.multiSelectPosition.selected,
+      'grid-view__column--multi-select-top': props.multiSelectPosition.top,
+      'grid-view__column--multi-select-right': props.multiSelectPosition.right,
+      'grid-view__column--multi-select-left': props.multiSelectPosition.left,
+      'grid-view__column--multi-select-bottom':
+        props.multiSelectPosition.bottom,
+      'grid-view__column--group-end': props.groupEnd,
     }"
     :style="data.style"
-    @click="$options.methods.select($event, parent, props.field.id)"
+    @click.exact="$options.methods.select($event, parent, props.field.id)"
+    @mousedown.left="$options.methods.cellMouseDownLeft($event, listeners)"
+    @mouseover="$options.methods.cellMouseover($event, listeners)"
+    @mouseup.left="$options.methods.cellMouseUpLeft($event, listeners)"
+    @click.shift.exact="$options.methods.cellShiftClick($event, listeners)"
   >
     <component
       :is="$options.methods.getFunctionalComponent(parent, props)"
@@ -21,21 +42,29 @@
         !parent.alive.includes(props.field.id)
       "
       ref="unselectedField"
+      :workspace-id="props.workspaceId"
       :field="props.field"
       :value="props.row['field_' + props.field.id]"
       :state="props.state"
       :read-only="props.readOnly"
+      :store-prefix="props.storePrefix"
     />
     <component
       :is="$options.methods.getComponent(parent, props)"
       v-else
       ref="selectedField"
+      :workspace-id="props.workspaceId"
       :field="props.field"
       :value="props.row['field_' + props.field.id]"
       :selected="parent.isCellSelected(props.field.id)"
+      :store-prefix="props.storePrefix"
       :read-only="props.readOnly"
+      :row="props.row"
+      :all-fields-in-table="props.allFieldsInTable"
       @update="(...args) => $options.methods.update(listeners, props, ...args)"
+      @paste="(...args) => $options.methods.paste(listeners, props, ...args)"
       @edit="(...args) => $options.methods.edit(listeners, props, ...args)"
+      @refresh-row="$options.methods.refreshRow(listeners, props)"
       @unselect="$options.methods.unselect(parent, props)"
       @selected="$options.methods.selected(listeners, props, $event)"
       @unselected="$options.methods.unselected(listeners, props, $event)"
@@ -45,8 +74,10 @@
       @selectNext="$options.methods.selectNext(listeners, props, 'next')"
       @selectAbove="$options.methods.selectNext(listeners, props, 'above')"
       @selectBelow="$options.methods.selectNext(listeners, props, 'below')"
+      @add-row-after="$options.methods.addRowAfter(listeners, props)"
       @add-keep-alive="parent.addKeepAlive(props.field.id)"
       @remove-keep-alive="parent.removeKeepAlive(props.field.id)"
+      @edit-modal="$options.methods.editModal(listeners)"
     />
   </div>
 </template>
@@ -65,7 +96,7 @@ export default {
     getFunctionalComponent(parent, props) {
       return parent.$registry
         .get('field', props.field.type)
-        .getFunctionalGridViewFieldComponent()
+        .getFunctionalGridViewFieldComponent(props.field)
     },
     /**
      * Returns the component related to the field type. This component will only be
@@ -74,7 +105,7 @@ export default {
     getComponent(parent, props) {
       return parent.$registry
         .get('field', props.field.type)
-        .getGridViewFieldComponent()
+        .getGridViewFieldComponent(props.field)
     },
     /**
      * If the grid field component emits an update event then this method will be
@@ -88,6 +119,15 @@ export default {
           field: props.field,
           value,
           oldValue,
+        })
+      }
+    },
+    paste(listeners, props, event) {
+      if (listeners.paste) {
+        listeners.paste({
+          data: event,
+          row: props.row,
+          field: props.field,
         })
       }
     },
@@ -113,6 +153,26 @@ export default {
     select(event, parent, fieldId) {
       event.preventFieldCellUnselect = true
       parent.selectCell(fieldId)
+    },
+    cellMouseDownLeft(event, listeners) {
+      if (listeners['cell-mousedown-left'] && !event.shiftKey) {
+        listeners['cell-mousedown-left']()
+      }
+    },
+    cellMouseover(event, listeners) {
+      if (listeners['cell-mouseover']) {
+        listeners['cell-mouseover']()
+      }
+    },
+    cellMouseUpLeft(event, listeners) {
+      if (listeners['cell-mouseup-left']) {
+        listeners['cell-mouseup-left']()
+      }
+    },
+    cellShiftClick(event, listeners) {
+      if (listeners['cell-shift-click']) {
+        listeners['cell-shift-click']()
+      }
     },
     /**
      * Called when the cell field type component needs to cell to be unselected.
@@ -153,6 +213,24 @@ export default {
           field: props.field,
           direction,
         })
+      }
+    },
+    /**
+     * Emits an event that creates a row directly after this row.
+     */
+    addRowAfter(listeners, props) {
+      if (listeners['add-row-after']) {
+        listeners['add-row-after'](props.row)
+      }
+    },
+    editModal(listeners) {
+      if (listeners['edit-modal']) {
+        listeners['edit-modal']()
+      }
+    },
+    refreshRow(listeners, props) {
+      if (listeners['refresh-row']) {
+        listeners['refresh-row'](props.row)
       }
     },
   },

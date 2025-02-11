@@ -1,22 +1,27 @@
 export default (client) => {
   return {
-    login(username, password) {
-      return client.post('/user/token-auth/', {
-        username,
-        password,
+    login(email, password) {
+      return client.post('/user/token-auth/', { email, password })
+    },
+    blacklistToken(refreshToken) {
+      return client.post('/user/token-blacklist/', {
+        refresh_token: refreshToken,
       })
     },
-    refresh(token) {
-      return client.post('/user/token-refresh/', {
-        token,
-      })
+    refresh(refreshToken) {
+      return client.post(
+        '/user/token-refresh/',
+        { refresh_token: refreshToken },
+        { skipAuthRefresh: true }
+      )
     },
     register(
       email,
       name,
       password,
+      language,
       authenticate = true,
-      groupInvitationToken = null,
+      workspaceInvitationToken = null,
       templateId = null
     ) {
       const values = {
@@ -24,10 +29,11 @@ export default (client) => {
         email,
         password,
         authenticate,
+        language,
       }
 
-      if (groupInvitationToken !== null) {
-        values.group_invitation_token = groupInvitationToken
+      if (workspaceInvitationToken !== null) {
+        values.workspace_invitation_token = workspaceInvitationToken
       }
 
       if (templateId !== null) {
@@ -54,8 +60,32 @@ export default (client) => {
         new_password: newPassword,
       })
     },
+    sendVerifyEmail(email) {
+      return client.post(`/user/send-verify-email/`, {
+        email,
+      })
+    },
+    verifyEmail(token) {
+      return client.post(`/user/verify-email/`, {
+        token,
+      })
+    },
     dashboard() {
       return client.get('/user/dashboard/')
+    },
+    update(values) {
+      return client.patch('/user/account/', values)
+    },
+    deleteAccount() {
+      return client.post('/user/schedule-account-deletion/')
+    },
+    shareOnboardingDetailsWithBaserow(team, role, size, country) {
+      return client.post('/user/share-onboarding-details-with-baserow/', {
+        team,
+        role,
+        size,
+        country,
+      })
     },
   }
 }

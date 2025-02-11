@@ -1,57 +1,123 @@
+import addPublicAuthTokenHeader from '@baserow/modules/database/utils/publicView'
+
 export default (client) => {
   return {
     fetchRows({
       gridId,
       limit = 100,
       offset = null,
-      cancelToken = null,
+      signal = null,
       includeFieldOptions = false,
-      search = false,
+      includeRowMetadata = true,
+      search = '',
+      searchMode = '',
+      publicUrl = false,
+      publicAuthToken = null,
+      groupBy = '',
+      orderBy = null,
+      filters = {},
+      includeFields = [],
+      excludeFields = [],
     }) {
-      const config = {
-        params: {
-          limit,
-        },
-      }
       const include = []
+      const params = new URLSearchParams()
+      params.append('limit', limit)
 
       if (offset !== null) {
-        config.params.offset = offset
-      }
-
-      if (cancelToken !== null) {
-        config.cancelToken = cancelToken
+        params.append('offset', offset)
       }
 
       if (includeFieldOptions) {
         include.push('field_options')
       }
 
+      if (includeRowMetadata) {
+        include.push('row_metadata')
+      }
+
       if (include.length > 0) {
-        config.params.include = include.join(',')
+        params.append('include', include.join(','))
       }
 
       if (search) {
-        config.params.search = search
+        params.append('search', search)
+        if (searchMode) {
+          params.append('search_mode', searchMode)
+        }
       }
 
-      return client.get(`/database/views/grid/${gridId}/`, config)
+      if (groupBy) {
+        params.append('group_by', groupBy)
+      }
+
+      if (orderBy || orderBy === '') {
+        params.append('order_by', orderBy)
+      }
+
+      if (includeFields.length > 0) {
+        params.append('include_fields', includeFields.join(','))
+      }
+
+      if (excludeFields.length > 0) {
+        params.append('exclude_fields', excludeFields.join(','))
+      }
+
+      Object.keys(filters).forEach((key) => {
+        filters[key].forEach((value) => {
+          params.append(key, value)
+        })
+      })
+
+      const config = { params }
+
+      if (signal !== null) {
+        config.signal = signal
+      }
+
+      if (publicAuthToken) {
+        addPublicAuthTokenHeader(config, publicAuthToken)
+      }
+
+      const url = publicUrl ? 'public/rows/' : ''
+      return client.get(`/database/views/grid/${gridId}/${url}`, config)
     },
-    fetchCount({ gridId, search, cancelToken = null }) {
-      const config = {
-        params: {
-          count: true,
-        },
-      }
-      if (cancelToken !== null) {
-        config.cancelToken = cancelToken
-      }
+    fetchCount({
+      gridId,
+      search = '',
+      searchMode = '',
+      signal = null,
+      publicUrl = false,
+      publicAuthToken = null,
+      filters = {},
+    }) {
+      const params = new URLSearchParams()
+      params.append('count', true)
 
       if (search) {
-        config.params.search = search
+        params.append('search', search)
+        if (searchMode) {
+          params.append('search_mode', searchMode)
+        }
       }
 
-      return client.get(`/database/views/grid/${gridId}/`, config)
+      Object.keys(filters).forEach((key) => {
+        filters[key].forEach((value) => {
+          params.append(key, value)
+        })
+      })
+
+      const config = { params }
+
+      if (signal !== null) {
+        config.signal = signal
+      }
+
+      if (publicAuthToken) {
+        addPublicAuthTokenHeader(config, publicAuthToken)
+      }
+
+      const url = publicUrl ? 'public/rows/' : ''
+      return client.get(`/database/views/grid/${gridId}/${url}`, config)
     },
     filterRows({ gridId, rowIds, fieldIds = null }) {
       const data = { row_ids: rowIds }
@@ -61,6 +127,73 @@ export default (client) => {
       }
 
       return client.post(`/database/views/grid/${gridId}/`, data)
+    },
+    fetchFieldAggregations({
+      gridId,
+      filters = {},
+      search = '',
+      searchMode = '',
+      signal = null,
+    }) {
+      const params = new URLSearchParams()
+
+      Object.keys(filters).forEach((key) => {
+        filters[key].forEach((value) => {
+          params.append(key, value)
+        })
+      })
+
+      if (search) {
+        params.append('search', search)
+        if (searchMode) {
+          params.append('search_mode', searchMode)
+        }
+      }
+
+      const config = { params }
+
+      if (signal !== null) {
+        config.signal = signal
+      }
+
+      return client.get(`/database/views/grid/${gridId}/aggregations/`, config)
+    },
+    fetchPublicFieldAggregations({
+      slug,
+      publicAuthToken = null,
+      filters = {},
+      search = '',
+      searchMode = '',
+      signal = null,
+    }) {
+      const params = new URLSearchParams()
+
+      Object.keys(filters).forEach((key) => {
+        filters[key].forEach((value) => {
+          params.append(key, value)
+        })
+      })
+
+      if (search) {
+        params.append('search', search)
+        if (searchMode) {
+          params.append('search_mode', searchMode)
+        }
+      }
+
+      const config = { params }
+      if (publicAuthToken) {
+        addPublicAuthTokenHeader(config, publicAuthToken)
+      }
+
+      if (signal !== null) {
+        config.signal = signal
+      }
+
+      return client.get(
+        `/database/views/grid/${slug}/public/aggregations/`,
+        config
+      )
     },
   }
 }

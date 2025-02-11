@@ -1,9 +1,12 @@
-from django.core.files.storage import default_storage
 from django.utils.functional import lazy
+
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema_field
-from rest_framework import serializers, fields
+from rest_framework import fields, serializers
 
+from baserow.api.serializers import FileURLSerializerMixin
+from baserow.contrib.database.api.constants import get_filters_object_description
+from baserow.contrib.database.api.views.serializers import PublicViewFiltersSerializer
 from baserow.contrib.database.export.handler import ExportHandler
 from baserow.contrib.database.export.models import ExportJob
 from baserow.contrib.database.export.registries import table_exporter_registry
@@ -58,28 +61,25 @@ SUPPORTED_CSV_COLUMN_SEPARATORS = [
 ]
 
 
-class ExportedFileURLSerializerMixin(serializers.Serializer):
+class ExportedFileURLSerializerMixin(FileURLSerializerMixin):
     """
     When mixed in to a model serializer for an ExportJob this will add an url field
     with the actual usable url of the export job's file (if it has one).
     """
 
-    url = serializers.SerializerMethodField()
-
-    def get_instance_attr(self, instance, name):
-        return getattr(instance, name)
-
-    @extend_schema_field(OpenApiTypes.URI)
-    def get_url(self, instance):
-        name = self.get_instance_attr(instance, "exported_file_name")
-        if name:
-            path = ExportHandler().export_file_path(name)
-            return default_storage.url(path)
-        else:
-            return None
+    def get_handler(self):
+        return ExportHandler()
 
 
 class ExportJobSerializer(ExportedFileURLSerializerMixin, serializers.ModelSerializer):
+    status = serializers.SerializerMethodField(
+        help_text="DEPRECATED: Use state instead"
+    )
+
+    @extend_schema_field(OpenApiTypes.STR)
+    def get_status(self, instance):
+        return instance.state
+
     class Meta:
         model = ExportJob
         fields = [
@@ -87,6 +87,7 @@ class ExportJobSerializer(ExportedFileURLSerializerMixin, serializers.ModelSeria
             "table",
             "view",
             "exporter_type",
+            "state",
             "status",
             "exported_file_name",
             "created_at",
@@ -122,6 +123,28 @@ class BaseExporterOptionsSerializer(serializers.Serializer):
         choices=SUPPORTED_EXPORT_CHARSETS,
         default="utf-8",
         help_text="The character set to use when creating the export file.",
+    )
+    filters = PublicViewFiltersSerializer(
+        required=False,
+        allow_null=True,
+        help_text=lazy(
+            lambda: get_filters_object_description(True, False),
+            str,
+        )(),
+    )
+    order_by = serializers.CharField(
+        required=False,
+        allow_null=True,
+        allow_blank=True,
+        help_text="Optionally the rows can be ordered by provided field ids separated "
+        "by comma. By default a field is ordered in ascending (A-Z) order, but by "
+        "prepending the field with a '-' it can be ordered descending (Z-A).",
+    )
+    fields = serializers.ListField(
+        required=False,
+        allow_null=True,
+        child=serializers.IntegerField(),
+        help_text="List of field IDs that must be included in the export, in the desired order.",
     )
 
 

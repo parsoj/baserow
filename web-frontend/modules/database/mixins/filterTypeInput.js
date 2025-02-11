@@ -1,3 +1,5 @@
+import viewFilter from '@baserow/modules/database/mixins/viewFilter'
+
 let delayTimeout = null
 
 /**
@@ -7,40 +9,49 @@ let delayTimeout = null
  * passes.
  */
 export default {
-  props: {
-    value: {
-      type: String,
-      required: true,
-    },
-    readOnly: {
-      type: Boolean,
-      required: true,
-    },
-  },
+  mixins: [viewFilter],
   data() {
     return {
       copy: null,
+      // This can be used to avoid changing the value if the user is editing it
+      // Or can be set i.e. by onFocus event
+      focused: false,
     }
   },
   watch: {
-    value(value) {
-      this.copy = value
+    'filter.value'(value, oldValue) {
+      if (!this.focused) {
+        this.copy = this.prepareCopy(this.filter.value)
+        if (oldValue !== value) {
+          this.afterValueChanged(value, oldValue)
+        }
+      }
       clearTimeout(delayTimeout)
     },
   },
   created() {
-    this.copy = this.value
+    this.copy = this.prepareCopy(this.filter.value)
+    if (this.copy) {
+      this.$v.$touch()
+    }
   },
   methods: {
+    isInputValid() {
+      return !this.$v.copy.$error
+    },
+    prepareCopy(value) {
+      return value
+    },
+    afterValueChanged(value, oldValue) {},
     delayedUpdate(value, immediately = false) {
-      if (this.readOnly) {
+      if (this.disabled) {
         return
       }
 
       clearTimeout(delayTimeout)
       this.$v.$touch()
 
-      if (this.$v.copy.$error) {
+      if (!this.isInputValid()) {
         return
       }
 

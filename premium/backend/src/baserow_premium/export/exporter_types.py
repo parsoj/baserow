@@ -1,21 +1,44 @@
 import json
 from collections import OrderedDict
-from typing import Type, List
+from typing import List, Optional, Type
+
+from baserow_premium.license.handler import LicenseHandler
+from openpyxl import Workbook
 
 from baserow.contrib.database.api.export.serializers import (
     BaseExporterOptionsSerializer,
 )
-from baserow.contrib.database.export.file_writer import (
-    QuerysetSerializer,
-    FileWriter,
-)
+from baserow.contrib.database.export.file_writer import FileWriter, QuerysetSerializer
 from baserow.contrib.database.export.registries import TableExporter
+from baserow.contrib.database.export.utils import view_is_publicly_exportable
 from baserow.contrib.database.views.view_types import GridViewType
 
+from ..license.features import PREMIUM
+from .serializers import ExcelExporterOptionsSerializer
 from .utils import get_unique_name, safe_xml_tag_name, to_xml
 
 
+class PremiumTableExporter(TableExporter):
+    def before_job_create(self, user, table, view, export_options):
+        """
+        Checks if the related user access to a valid license before the job is created.
+        """
+
+        if view_is_publicly_exportable(user, view):
+            # No need to check if the workspace has the license if the view is
+            # publicly exportable because then we should always allow it, regardless
+            # of the license.
+            pass
+        else:
+            LicenseHandler.raise_if_user_doesnt_have_feature(
+                PREMIUM, user, table.database.workspace
+            )
+        super().before_job_create(user, table, view, export_options)
+
+
 class JSONQuerysetSerializer(QuerysetSerializer):
+    can_handle_rich_value = True
+
     def write_to_file(self, file_writer: FileWriter, export_charset="utf-8"):
         """
         Writes the queryset to the provided file in json format. Will generate
@@ -49,11 +72,11 @@ class JSONQuerysetSerializer(QuerysetSerializer):
         file_writer.write("\n]\n", encoding=export_charset)
 
 
-class JSONTableExporter(TableExporter):
+class JSONTableExporter(PremiumTableExporter):
     type = "json"
 
     @property
-    def queryset_serializer_class(self) -> Type["QuerysetSerializer"]:
+    def queryset_serializer_class(self):
         return JSONQuerysetSerializer
 
     @property
@@ -74,6 +97,8 @@ class JSONTableExporter(TableExporter):
 
 
 class XMLQuerysetSerializer(QuerysetSerializer):
+    can_handle_rich_value = True
+
     def write_to_file(self, file_writer: FileWriter, export_charset="utf-8"):
         """
         Writes the queryset to the provided file in xml format. Will generate
@@ -112,11 +137,11 @@ class XMLQuerysetSerializer(QuerysetSerializer):
         file_writer.write("</rows>\n", encoding=export_charset)
 
 
-class XMLTableExporter(TableExporter):
+class XMLTableExporter(PremiumTableExporter):
     type = "xml"
 
     @property
-    def queryset_serializer_class(self) -> Type["QuerysetSerializer"]:
+    def queryset_serializer_class(self):
         return XMLQuerysetSerializer
 
     @property
@@ -134,3 +159,69 @@ class XMLTableExporter(TableExporter):
     @property
     def file_extension(self) -> str:
         return ".xml"
+
+
+class ExcelQuerysetSerializer(QuerysetSerializer):
+    def __init__(self, queryset, ordered_field_objects):
+        super().__init__(queryset, ordered_field_objects)
+
+        self.headers = OrderedDict({"id": "id"})
+
+        for field_object in ordered_field_objects:
+            field_database_name = field_object["name"]
+            field_display_name = field_object["field"].name
+            self.headers[field_database_name] = field_display_name
+
+    def write_to_file(
+        self,
+        file_writer: FileWriter,
+        export_charset: Optional[str] = None,
+        excel_include_header: bool = False,
+    ):
+        """
+        :param file_writer: The FileWriter instance to write to.
+        :param export_charset:
+        :param excel_include_header: Whether or not to include a header in the resulting
+        Excel file.
+        """
+
+        workbook = Workbook(write_only=True)
+        worksheet = workbook.create_sheet()
+
+        if excel_include_header:
+            worksheet.append(list(self.headers.values()))
+
+        def write_row(row, _):
+            data = []
+            for field_serializer in self.field_serializers:
+                _, _, field_human_value = field_serializer(row)
+                data.append(str(field_human_value))
+            worksheet.append(data)
+
+        file_writer.write_rows(self.queryset, write_row)
+
+        workbook.save(file_writer._file)
+
+
+class ExcelTableExporter(PremiumTableExporter):
+    type = "excel"
+
+    @property
+    def option_serializer_class(self) -> Type[BaseExporterOptionsSerializer]:
+        return ExcelExporterOptionsSerializer
+
+    @property
+    def can_export_table(self) -> bool:
+        return True
+
+    @property
+    def supported_views(self) -> List[str]:
+        return [GridViewType.type]
+
+    @property
+    def file_extension(self) -> str:
+        return ".xlsx"
+
+    @property
+    def queryset_serializer_class(self):
+        return ExcelQuerysetSerializer

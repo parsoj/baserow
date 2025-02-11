@@ -1,114 +1,86 @@
 from __future__ import print_function
 
-import sys
+from io import IOBase
+from pathlib import Path
 
-import psycopg2
-import pytest
+from django.core.management import call_command
 from django.db import connections
-from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
+from django.test.testcases import TransactionTestCase
+
+import pytest
+
+# noinspection PyUnresolvedReferences
+from baserow.test_utils.pytest_conftest import *  # noqa: F403, F401
 
 
-@pytest.fixture
-def data_fixture():
-    from .fixtures import Fixtures
+def _fixture_teardown(self):
+    """
+    This is a custom implementation of `TransactionTestCase._fixture_teardown`
+    from Django (https://github.com/django/django/blob/main/django/test/testcases.py)
+    that flushes test database after test runs with allow_cascade=True.
 
-    return Fixtures()
+    This is needed as our custom Baserow tables won't be in the list of tables
+    to truncate, and hence may create problems when rows are
+    referencing other tables.
+    """
 
-
-@pytest.fixture()
-def api_client():
-    from rest_framework.test import APIClient
-
-    return APIClient()
-
-
-# We reuse this file in the premium backend folder, if you run a pytest session over
-# plugins and the core at the same time pytest will crash if this called multiple times.
-def pytest_addoption(parser):
-    # Unfortunately a simple decorator doesn't work here as pytest is doing some
-    # exciting reflection of sorts over this function and crashes if it is wrapped.
-    if not hasattr(pytest_addoption, "already_run"):
-        parser.addoption(
-            "--runslow", action="store_true", default=False, help="run slow tests"
+    # Allow TRUNCATE ... CASCADE and don't emit the post_migrate signal
+    # when flushing only a subset of the apps
+    for db_name in self._databases_names(include_mirrors=False):
+        # Flush the database
+        inhibit_post_migrate = (
+            self.available_apps is not None
+            or (  # Inhibit the post_migrate signal when using serialized
+                # rollback to avoid trying to recreate the serialized data.
+                self.serialized_rollback
+                and hasattr(connections[db_name], "_test_serialized_contents")
+            )
         )
-        pytest_addoption.already_run = True
+        call_command(
+            "flush",
+            verbosity=0,
+            interactive=False,
+            database=db_name,
+            reset_sequences=False,
+            allow_cascade=True,  # CHANGED FROM DJANGO
+            inhibit_post_migrate=inhibit_post_migrate,
+        )
 
 
-def pytest_configure(config):
-    if not hasattr(pytest_configure, "already_run"):
-        config.addinivalue_line("markers", "slow: mark test as slow to run")
-        pytest_configure.already_run = True
-
-
-def pytest_collection_modifyitems(config, items):
-    if config.getoption("--runslow"):
-        # --runslow given in cli: do not skip slow tests
-        return
-    skip_slow = pytest.mark.skip(reason="need --runslow option to run")
-    for item in items:
-        if "slow" in item.keywords:
-            item.add_marker(skip_slow)
-
-
-def run_non_transactional_raw_sql(sqls, dbinfo):
-    conn = psycopg2.connect(
-        host=dbinfo["HOST"],
-        user=dbinfo["USER"],
-        password=dbinfo["PASSWORD"],
-        port=int(dbinfo["PORT"]),
-    )
-    conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
-    cursor = conn.cursor()
-    for sql in sqls:
-        cursor.execute(sql)
-
-    conn.close()
-
-
-# Nicest way of printing to stderr sourced from
-# https://stackoverflow.com/questions/5574702/how-to-print-to-stderr-in-python
-def eprint(*args, **kwargs):
-    print(*args, file=sys.stderr, **kwargs)
+TransactionTestCase._fixture_teardown = _fixture_teardown
 
 
 @pytest.fixture()
-def user_tables_in_separate_db(settings):
+def test_data_dir() -> Path:
     """
-    Creates a temporary database and sets up baserow so it is used to store user tables.
-
-    Currently this has only been implemented at a function level scope as adding
-    databases to settings.DATABASES causes pytest to assume they are extra replica dbs
-    and spend ages setting them up as mirrors. Instead keeping this at the functional
-    scope lets us keep it simple and quick.
+    Returns root path for test data directory
     """
 
-    default_db = settings.DATABASES["default"]
-    user_table_db_name = f'{default_db["NAME"]}_user_tables'
+    return Path(__file__).parent.joinpath("test_data")
 
-    # Print to stderr to match pytest-django's behaviour for logging about test
-    # database setup and teardown.
-    eprint(f"Dropping and recreating {user_table_db_name} for test.")
 
-    settings.USER_TABLE_DATABASE = "user_tables_database"
-    settings.DATABASES["user_tables_database"] = dict(default_db)
-    settings.DATABASES["user_tables_database"]["NAME"] = user_table_db_name
+@pytest.fixture()
+def open_test_file(test_data_dir):
+    """
+    Opens a test data file on a given path.
 
-    # You cannot drop databases inside transactions and django provides no easy way
-    # of turning them off temporarily. Instead we need to open our own connection so
-    # we can turn off transactions to perform the required setup/teardown sql. See:
-    # https://pytest-django.readthedocs.io/en/latest/database.html#using-a-template
-    # -database-for-tests
-    run_non_transactional_raw_sql(
-        [
-            f"DROP DATABASE IF EXISTS {user_table_db_name}; ",
-            f"CREATE DATABASE {user_table_db_name}",
-        ],
-        default_db,
-    )
+    usage:
 
-    yield connections["user_tables_database"]
+    def test_me(open_test_file):
+        with open_test_file('baserow/core/test.data', 'rt') as f:
+            assert not f.closed
 
-    # Close django's connection to the user table db so we can drop it.
-    connections["user_tables_database"].close()
+    Note: the caller can treat this as a context manager factory.
+    """
 
-    run_non_transactional_raw_sql([f"DROP DATABASE {user_table_db_name}"], default_db)
+    fhandle: IOBase | None = None
+
+    def get_path(tpath, /, mode="rb") -> IOBase:
+        nonlocal fhandle
+        fhandle = (test_data_dir / (tpath)).open(mode=mode)
+
+        return fhandle
+
+    yield get_path
+    if fhandle and not fhandle.closed:
+        fhandle.close()

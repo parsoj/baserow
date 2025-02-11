@@ -3,15 +3,15 @@
     ref="cell"
     class="grid-view__cell grid-field-file__cell"
     :class="{ active: selected }"
-    @drop.prevent="uploadFiles($event)"
+    @drop.prevent="onDrop($event)"
     @dragover.prevent
     @dragenter.prevent="dragEnter($event)"
     @dragleave="dragLeave($event)"
   >
     <div v-show="dragging" class="grid-field-file__dragging">
       <div>
-        <i class="grid-field-file__drop-icon fas fa-cloud-upload-alt"></i>
-        Drop here
+        <i class="grid-field-file__drop-icon iconoir-cloud-upload"></i>
+        {{ $t('gridViewFieldFile.dropHere') }}
       </div>
     </div>
     <ul v-if="Array.isArray(value)" class="grid-field-file__list">
@@ -32,8 +32,8 @@
           />
           <i
             v-else
-            class="fas grid-field-file__icon"
-            :class="'fa-' + getIconClass(file.mime_type)"
+            class="grid-field-file__icon"
+            :class="getIconClass(file.mime_type)"
           ></i>
         </a>
       </li>
@@ -46,11 +46,11 @@
       </li>
       <li v-if="!readOnly" v-show="selected" class="grid-field-file__item">
         <a class="grid-field-file__item-add" @click.prevent="showUploadModal()">
-          <i class="fas fa-plus"></i>
+          <i class="iconoir-plus"></i>
         </a>
         <div v-if="value.length == 0" class="grid-field-file__drop">
-          <i class="grid-field-file__drop-icon fas fa-cloud-upload-alt"></i>
-          Drop files here
+          <i class="grid-field-file__drop-icon iconoir-cloud-upload"></i>
+          {{ $t('gridViewFieldFile.dropFileHere') }}
         </div>
       </li>
     </ul>
@@ -100,7 +100,13 @@ export default {
      * Method is called when the user drops his files into the field. The files should
      * automatically be uploaded to the user files and added to the field after that.
      */
-    async uploadFiles(event) {
+    async onDrop(event) {
+      const files = [...event.dataTransfer.items].map((item) =>
+        item.getAsFile()
+      )
+      await this.uploadFiles(files)
+    },
+    async uploadFiles(fileArray) {
       if (this.readOnly) {
         return
       }
@@ -111,7 +117,7 @@ export default {
       // select another cell.
       this.$emit('add-keep-alive')
 
-      const files = Array.from(event.dataTransfer.files).map((file) => {
+      const files = fileArray.map((file) => {
         return {
           id: uuid(),
           file,
@@ -146,16 +152,16 @@ export default {
 
         const index = this.loadings.findIndex((l) => l.id === id)
         this.loadings.splice(index, 1)
-
-        // Indicates that this component can be destroyed if it is not selected.
-        this.$emit('remove-keep-alive')
       }
+
+      // Indicates that this component can be destroyed if it is not selected.
+      this.$emit('remove-keep-alive')
     },
     select() {
-      // While the field is selected we want to open the select row popup by pressing
+      // While the field is selected we want to open the select row toast by pressing
       // the enter key.
       this.$el.keydownEvent = (event) => {
-        if (event.keyCode === 13 && !this.modalOpen) {
+        if (event.key === 'Enter' && !this.modalOpen) {
           this.showUploadModal()
         }
       }
@@ -205,16 +211,13 @@ export default {
      * While the modal is open, all key combinations related to the field must be
      * ignored.
      */
+    canSelectNext() {
+      return !this.modalOpen
+    },
     canKeyDown() {
       return !this.modalOpen
     },
-    canPaste() {
-      return !this.modalOpen
-    },
-    canCopy() {
-      return !this.modalOpen
-    },
-    canEmpty() {
+    canKeyboardShortcut() {
       return !this.modalOpen
     },
     dragEnter(event) {
@@ -232,6 +235,23 @@ export default {
         this.dragging = false
         this.dragTarget = null
       }
+    },
+    onPaste(event) {
+      if (
+        !event.clipboardData.types.includes('text/plain') ||
+        event.clipboardData.getData('text/plain').startsWith('file:///')
+      ) {
+        const { items } = event.clipboardData
+        for (let i = 0; i < items.length; i++) {
+          const item = items[i]
+          if (item.type.includes('image')) {
+            const file = item.getAsFile()
+            this.uploadFiles([file])
+            return true
+          }
+        }
+      }
+      return false
     },
   },
 }

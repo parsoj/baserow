@@ -1,50 +1,28 @@
 <template>
-  <FieldSingleSelectDropdown
+  <FieldSelectOptionsDropdown
     :value="copy"
     :options="field.select_options"
-    :disabled="readOnly"
-    class="dropdown--floating filters__value-dropdown dropdown--tiny"
+    :disabled="disabled"
+    :fixed-items="true"
+    class="dropdown--floating filters__value-dropdown"
     @input="input"
-  ></FieldSingleSelectDropdown>
+  ></FieldSelectOptionsDropdown>
 </template>
 
 <script>
-import FieldSingleSelectDropdown from '@baserow/modules/database/components/field/FieldSingleSelectDropdown'
+import FieldSelectOptionsDropdown from '@baserow/modules/database/components/field/FieldSelectOptionsDropdown'
+import viewFilter from '@baserow/modules/database/mixins/viewFilter'
 
 export default {
   name: 'ViewFilterTypeSelectOptions',
-  components: { FieldSingleSelectDropdown },
-  props: {
-    value: {
-      type: String,
-      required: true,
-    },
-    fieldId: {
-      type: Number,
-      required: true,
-    },
-    primary: {
-      type: Object,
-      required: true,
-    },
-    fields: {
-      type: Array,
-      required: true,
-    },
-    readOnly: {
-      type: Boolean,
-      required: true,
-    },
-  },
+  components: { FieldSelectOptionsDropdown },
+  mixins: [viewFilter],
   computed: {
     copy() {
-      const value = this.value
-      return value === '' ? null : parseInt(value) || null
-    },
-    field() {
-      return this.primary.id === this.fieldId
-        ? this.primary
-        : this.fields.find((f) => f.id === this.fieldId)
+      const value = String(this.filter.value ?? '')
+      return value === '' || value.includes(',')
+        ? null
+        : parseInt(value) || null
     },
   },
   methods: {

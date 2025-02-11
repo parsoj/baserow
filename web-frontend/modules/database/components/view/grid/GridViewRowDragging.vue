@@ -1,5 +1,9 @@
 <template>
-  <div v-show="dragging" class="grid-view__row-dragging-container">
+  <div
+    v-show="dragging"
+    class="grid-view__row-dragging-container"
+    :style="{ left: offset + 'px' }"
+  >
     <div
       class="grid-view__row-dragging"
       :style="{ width: width + 'px', top: draggingTop + 'px' }"
@@ -29,17 +33,22 @@ export default {
       type: Object,
       required: true,
     },
-    primary: {
-      type: Object,
+    allVisibleFields: {
+      type: Array,
       required: true,
     },
-    fields: {
+    allFieldsInTable: {
       type: Array,
       required: true,
     },
     vertical: {
       type: String,
       required: true,
+    },
+    offset: {
+      type: Number,
+      required: false,
+      default: () => 0,
     },
   },
   data() {
@@ -66,10 +75,9 @@ export default {
   },
   computed: {
     width() {
-      const allFields = [this.primary].concat(this.fields)
       return (
-        allFields.reduce(
-          (value, field) => this.getFieldWidth(field.id) + value,
+        this.allVisibleFields.reduce(
+          (value, field) => this.getFieldWidth(field) + value,
           0
         ) + this.gridViewRowDetailsWidth
       )
@@ -123,7 +131,7 @@ export default {
       window.addEventListener('mouseup', this.$el.upEvent)
 
       this.$el.keydownEvent = (event) => {
-        if (event.keyCode === 27) {
+        if (event.key === 'Escape') {
           // When the user presses the escape key we want to cancel the action
           this.cancel(event)
         }
@@ -228,9 +236,8 @@ export default {
         }
 
         // If the row needs to be placed after itself.
-        const allRows = this.$store.getters[
-          this.storePrefix + 'view/grid/getAllRows'
-        ]
+        const allRows =
+          this.$store.getters[this.storePrefix + 'view/grid/getAllRows']
         const index = allRows.findIndex((r) => r.id === this.targetRow.id)
         const after = allRows[index - 1]
         if (after && this.row.id === after.id) {
@@ -245,8 +252,7 @@ export default {
         await this.$store.dispatch(this.storePrefix + 'view/grid/moveRow', {
           table: this.table,
           grid: this.view,
-          fields: this.fields,
-          primary: this.primary,
+          fields: this.allFieldsInTable,
           getScrollTop,
           row: this.row,
           before: this.targetRow,

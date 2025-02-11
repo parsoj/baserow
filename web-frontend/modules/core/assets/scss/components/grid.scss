@@ -2,9 +2,8 @@
   box-sizing: border-box;
   display: flex;
   flex: 0 1 auto;
-  flex-direction: row;
-  flex-wrap: wrap;
-  margin: 0 -#{$grid-width};
+  flex-flow: row wrap;
+  margin: 0 calc(var(--gap, #{$grid-width}) * -1);
 }
 
 .col {
@@ -12,7 +11,7 @@
   flex-grow: 1;
   flex-basis: 0;
   max-width: 100%;
-  padding: 0 $grid-width;
+  padding: 0 var(--gap, #{$grid-width});
 }
 
 @for $i from 1 through $grid-columns {

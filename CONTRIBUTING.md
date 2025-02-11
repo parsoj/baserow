@@ -10,7 +10,7 @@ get back to you as soon as possible with proposed issues.
 ## We develop with GitLab
 
 We use GitLab to host code, to track issues and to make feature requests. The official
-repository can be found on https://gitlab.com/bramw/baserow/. There is a mirror 
+repository can be found on https://gitlab.com/baserow/baserow/. There is a mirror 
 repository on GitHub, but this is not the official one.
 
 ## The merge request process
@@ -22,7 +22,7 @@ repository on GitHub, but this is not the official one.
 1. Make the changes described in the issue.
 1. Ensure that your code meets the quality standards.
 1. Submit your merge request!
-1. Usually we enable the following Gitlab merge options:
+1. Usually we enable the following GitLab merge options:
     1. "Delete source branch when merge request is accepted. "
     1. "Squash commits when merge request is accepted."
 1. A maintainer will review your code and merge your code.
@@ -33,11 +33,13 @@ repository on GitHub, but this is not the official one.
 * Python code must be compliant with the PEP 8 standard.
 * In code Python docs must be in reStructured style.
 * SCSS code must be compliant with BEM.
-* Javascript code must be compliant with the eslint:recommended rules.
+* JavaScript code must be compliant with the eslint:recommended rules.
 * In code documentation is required for every function or class that is not self-evident.
 * Documentation for every concept that can used by a plugin.
-* [changelog.md](changelog.md) should be updated with any new features.
+* A new changelog entry file should be generated using the script found in the changelog folder.
 * The pipeline must pass.
+* Try to apply the **rule of 10s**: MRs should aim to have no more than 10 code files with more than 10 lines modified. 
+  A code file doesn't include tests/css/text/migrations/translations/configuration/ etc.
 
 ## Any contributions you make will be under the MIT Software License
 
@@ -48,7 +50,7 @@ project. Feel free to contact us if that is a concern.
 ## Bug reports
 
 We use GitLab issues to track public bugs. You can report a bug by opening a new issue
-at https://gitlab.com/bramw/baserow/-/issues and selecting the Bug issue type. You may 
+at https://gitlab.com/baserow/baserow/-/issues and selecting the Bug issue type. You may 
 also send the bug to us via email or via the contact form at https://baserow.io/contact 
 instead if you prefer.
 
@@ -70,3 +72,7 @@ People love thorough bug reports.
 If you have found a vulnerability in Baserow we would appreciate it if you would notify
 us via email or via the contact form at https://baserow.io/contact instead of publicly
 as the vulnerability might need to be addressed first.
+
+## Updating Documentation
+
+The Baserow documentation can be updated by editing Markdown files in the `docs` directory. We use [CommonMark](https://commonmark.org/) specification rendered using [markdown-it](https://www.npmjs.com/package/markdown-it) library. The documentation site cannot be previewed at the moment, use a compatible Markdown editor to verify changes.

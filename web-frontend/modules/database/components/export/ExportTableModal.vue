@@ -1,21 +1,29 @@
 <template>
-  <Modal @hidden="stopPollIfRunning()">
+  <Modal @hidden="hidden">
     <div v-if="loadingViews" class="loading-overlay"></div>
-    <h2 class="box__title">Export {{ table.name }}</h2>
+    <h2 class="box__title">
+      {{ $t('exportTableModal.title', { name: table.name }) }}
+    </h2>
     <Error :error="error"></Error>
     <ExportTableForm
       ref="form"
+      v-slot="{ filename }"
+      :database="database"
+      :table="table"
       :view="view"
       :views="views"
       :loading="loading"
+      :enable-views-dropdown="enableViewsDropdown"
       @submitted="submitted"
       @values-changed="valuesChanged"
     >
-      <ExportTableLoadingBar
+      <ExportLoadingBar
         :job="job"
         :loading="loading"
         :disabled="!isValid"
-      ></ExportTableLoadingBar>
+        :filename="filename"
+      >
+      </ExportLoadingBar>
     </ExportTableForm>
   </Modal>
 </template>
@@ -29,13 +37,17 @@ import ExporterService from '@baserow/modules/database/services/export'
 import ViewService from '@baserow/modules/database/services/view'
 import { populateView } from '@baserow/modules/database/store/view'
 import ExportTableForm from '@baserow/modules/database/components/export/ExportTableForm'
-import ExportTableLoadingBar from '@baserow/modules/database/components/export/ExportTableLoadingBar'
+import ExportLoadingBar from '@baserow/modules/database/components/export/ExportLoadingBar'
 
 export default {
   name: 'ExportTableModal',
-  components: { ExportTableForm, ExportTableLoadingBar },
+  components: { ExportTableForm, ExportLoadingBar },
   mixins: [modal, error],
   props: {
+    database: {
+      type: Object,
+      required: true,
+    },
     table: {
       type: Object,
       required: true,
@@ -44,6 +56,25 @@ export default {
       type: Object,
       required: false,
       default: null,
+    },
+    startExport: {
+      type: Function,
+      required: false,
+      default: function ({ table, values, client }) {
+        return ExporterService(client).export(table.id, values)
+      },
+    },
+    getJob: {
+      type: Function,
+      required: false,
+      default: function (job, client) {
+        return ExporterService(client).get(job.id)
+      },
+    },
+    enableViewsDropdown: {
+      type: Boolean,
+      required: false,
+      default: true,
     },
   },
   data() {
@@ -57,13 +88,13 @@ export default {
     }
   },
   computed: {
+    jobHasFailed() {
+      return ['failed', 'cancelled'].includes(this.job.state)
+    },
     jobIsRunning() {
       return (
-        this.job !== null && ['exporting', 'pending'].includes(this.job.status)
+        this.job !== null && this.job.state !== 'finished' && !this.jobHasFailed
       )
-    },
-    jobHasFailed() {
-      return ['failed', 'cancelled'].includes(this.job.status)
     },
     ...mapState({
       selectedTableViews: (state) => state.view.items,
@@ -80,9 +111,8 @@ export default {
       })
       return show
     },
-    hide(...args) {
+    hidden(...args) {
       this.stopPollIfRunning()
-      return modal.methods.hide.call(this, ...args)
     },
     async fetchViews() {
       if (this.table._.selected) {
@@ -111,10 +141,12 @@ export default {
       this.hideError()
 
       try {
-        const { data } = await ExporterService(this.$client).export(
-          this.table.id,
-          values
-        )
+        const { data } = await this.startExport({
+          table: this.table,
+          view: this.view,
+          values,
+          client: this.$client,
+        })
         this.job = data
         if (this.pollInterval !== null) {
           clearInterval(this.pollInterval)
@@ -126,7 +158,7 @@ export default {
     },
     async getLatestJobInfo() {
       try {
-        const { data } = await ExporterService(this.$client).get(this.job.id)
+        const { data } = await this.getJob(this.job, this.$client)
         this.job = data
         if (!this.jobIsRunning) {
           this.loading = false
@@ -134,11 +166,13 @@ export default {
         }
         if (this.jobHasFailed) {
           const title =
-            this.job.status === 'failed' ? 'Export Failed' : 'Export Cancelled'
+            this.job.state === 'failed'
+              ? this.$t('exportTableModal.failedTitle')
+              : this.$t('exportTableModal.cancelledTitle')
           const message =
-            this.job.status === 'failed'
-              ? 'The export failed due to a server error.'
-              : 'The export was cancelled.'
+            this.job.state === 'failed'
+              ? this.$t('exportTableModal.failedDescription')
+              : this.$t('exportTableModal.cancelledDescription')
           this.showError(title, message)
         }
       } catch (error) {

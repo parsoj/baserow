@@ -1,5 +1,9 @@
 <template>
-  <Context :hide-on-click-outside="hideOnClickOutside" class="time-select">
+  <Context
+    :hide-on-click-outside="hideOnClickOutside"
+    class="time-select"
+    max-height-if-outside-viewport
+  >
     <ul @mousedown="$event.preventDefault()">
       <li v-for="time in getTimes(notation)" :key="time">
         <a :class="{ active: time === value }" @click="select(time)">
@@ -11,8 +15,7 @@
 </template>
 
 <script>
-import moment from 'moment'
-
+import moment from '@baserow/modules/core/moment'
 import context from '@baserow/modules/core/mixins/context'
 
 export default {

@@ -1,25 +1,36 @@
 <template>
   <Modal :tiny="true" :close-button="false">
     <h3>
-      Are you sure you want to
-      {{ selectedIsTrashed ? 'permanently delete' : 'empty the trash of' }}
-      {{ name }}?
+      <template v-if="selectedIsTrashed">{{
+        $t('trashEmptyModal.titleIsTrashed', { name })
+      }}</template>
+      <template v-else>{{
+        $t('trashEmptyModal.titleIsNotTrashed', { name })
+      }}</template>
     </h3>
     <p>
-      This will permanently delete
-      {{
-        selectedIsTrashed ? 'it and all of its contents' : 'the listed items'
-      }}. After which they cannot be recovered.
+      <template v-if="selectedIsTrashed">{{
+        $t('trashEmptyModal.messageIsTrashed')
+      }}</template>
+      <template v-else>{{
+        $t('trashEmptyModal.messageIsNotTrashed')
+      }}</template>
     </p>
     <div class="actions">
       <ul class="action__links">
         <li>
-          <a @click.prevent="hide()">Cancel</a>
+          <a @click.prevent="hide()">{{ $t('action.cancel') }}</a>
         </li>
       </ul>
-      <a class="button button button--error" @click.prevent="emitEmptyAndClose">
-        {{ selectedIsTrashed ? 'Permanently delete' : 'Empty' }}
-      </a>
+
+      <Button type="danger" @click.prevent="emitEmptyAndClose">
+        <template v-if="selectedIsTrashed">{{
+          $t('trashEmptyModal.buttonIsTrashed')
+        }}</template>
+        <template v-else>{{
+          $t('trashEmptyModal.buttonIsNotTrashed')
+        }}</template></Button
+      >
     </div>
   </Modal>
 </template>

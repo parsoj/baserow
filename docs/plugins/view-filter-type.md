@@ -35,7 +35,7 @@ class EqualToViewFilterType(ViewFilterType):
 
         # Check if the model_field accepts the value.
         try:
-            model_field.get_prep_value(value)
+            value = model_field.get_prep_value(value)
             return Q(**{field_name: value})
         except Exception:
             pass
@@ -163,9 +163,10 @@ plugins/my_baserow_plugin/web-frontend/plugin.js
 import { PluginNamePlugin } from '@my-baserow-plugin/plugins'
 import { EqualViewFilterType } from '@my-baserow-plugin/viewFilters'
 
-export default ({ store, app }) => {
-  app.$registry.register('plugin', new PluginNamePlugin())
-  app.$registry.register('viewFilter', new EqualViewFilterType())
+export default (context) => {
+  const { app } = context
+  app.$registry.register('plugin', new PluginNamePlugin(context))
+  app.$registry.register('viewFilter', new EqualViewFilterType(context))
 }
 ```
 

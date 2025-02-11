@@ -1,67 +1,29 @@
 import { AdminType } from '@baserow/modules/core/adminTypes'
 
-export class DashboardType extends AdminType {
+export class LicensesAdminType extends AdminType {
   static getType() {
-    return 'dashboard'
+    return 'licenses'
   }
 
   getIconClass() {
-    return 'chart-line'
+    return 'iconoir-shield-check'
   }
 
   getName() {
-    return 'Dashboard'
+    const { i18n } = this.app
+    return i18n.t('premium.adminType.licenses')
+  }
+
+  getCategory() {
+    const { i18n } = this.app
+    return i18n.t('sidebar.licenses')
   }
 
   getRouteName() {
-    return 'admin-dashboard'
+    return 'admin-licenses'
   }
 
   getOrder() {
-    return 1
-  }
-}
-
-export class UsersAdminType extends AdminType {
-  static getType() {
-    return 'users'
-  }
-
-  getIconClass() {
-    return 'users'
-  }
-
-  getName() {
-    return 'Users'
-  }
-
-  getRouteName() {
-    return 'admin-users'
-  }
-
-  getOrder() {
-    return 2
-  }
-}
-
-export class GroupsAdminType extends AdminType {
-  static getType() {
-    return 'groups'
-  }
-
-  getIconClass() {
-    return 'layer-group'
-  }
-
-  getName() {
-    return 'Groups'
-  }
-
-  getRouteName() {
-    return 'admin-groups'
-  }
-
-  getOrder() {
-    return 3
+    return 10000
   }
 }

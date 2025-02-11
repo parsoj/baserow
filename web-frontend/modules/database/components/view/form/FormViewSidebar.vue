@@ -3,7 +3,10 @@
     <div class="form-view__sidebar-fields">
       <div class="form-view__sidebar-fields-head">
         <div class="form-view__sidebar-fields-title">Fields</div>
-        <ul v-if="!readOnly" class="form-view__sidebar-fields-actions">
+        <ul
+          v-if="!readOnly && !isDeactivated"
+          class="form-view__sidebar-fields-actions"
+        >
           <li v-show="fields.length > 0">
             <a
               @click="
@@ -14,7 +17,7 @@
                   true
                 )
               "
-              >add all</a
+              >{{ $t('formSidebar.actions.addAll') }}</a
             >
           </li>
           <li v-show="enabledFields.length > 0">
@@ -27,7 +30,7 @@
                   true
                 )
               "
-              >remove all</a
+              >{{ $t('formSidebar.actions.removeAll') }}</a
             >
           </li>
         </ul>
@@ -37,12 +40,12 @@
           v-for="field in fields"
           :key="field.id"
           v-sortable="{
-            enabled: !readOnly,
+            enabled: !readOnly && !isDeactivated,
             id: field.id,
             update: order,
           }"
           :field="field"
-          :read-only="readOnly"
+          :read-only="readOnly || isDeactivated"
           @updated-field-options="
             updateFieldOptionsOfField(view, field, $event)
           "
@@ -50,21 +53,37 @@
         </FormViewSidebarField>
       </div>
       <p v-else class="form-view__sidebar-fields-description">
-        All the fields are in the form.
+        {{ $t('formSidebar.fieldsDescription') }}
       </p>
-      <div v-if="!readOnly">
-        <a
-          ref="createFieldContextLink"
-          @click="$refs.createFieldContext.toggle($refs.createFieldContextLink)"
-        >
-          <i class="fas fa-plus"></i>
-          Create new field
-        </a>
+      <div v-if="!readOnly && !isDeactivated">
+        <span ref="createFieldContextLink">
+          <ButtonText
+            icon="iconoir-plus"
+            @click="
+              $refs.createFieldContext.toggle($refs.createFieldContextLink)
+            "
+          >
+            {{ $t('formSidebar.actions.addField') }}
+          </ButtonText>
+        </span>
         <CreateFieldContext
           ref="createFieldContext"
           :table="table"
+          :view="view"
+          :all-fields-in-table="allFieldsInTable"
+          :database="database"
+          @field-created="$event.callback()"
         ></CreateFieldContext>
       </div>
+    </div>
+    <div class="form-view__sidebar-prefill-or-hide-link">
+      <a @click="showFormPrefillOrHideModal">
+        <i class="iconoir-chat-bubble-question"></i>
+        {{ $t('formSidebar.prefillOrHideInfoLink') }}
+      </a>
+      <FormPrefillOrHideModal
+        ref="formPrefillOrHideModal"
+      ></FormPrefillOrHideModal>
     </div>
   </div>
 </template>
@@ -73,12 +92,21 @@
 import CreateFieldContext from '@baserow/modules/database/components/field/CreateFieldContext'
 import formViewHelpers from '@baserow/modules/database/mixins/formViewHelpers'
 import FormViewSidebarField from '@baserow/modules/database/components/view/form/FormViewSidebarField'
+import FormPrefillOrHideModal from '@baserow/modules/database/components/view/form/FormPrefillOrHideModal'
 
 export default {
   name: 'FormViewSidebar',
-  components: { CreateFieldContext, FormViewSidebarField },
+  components: {
+    FormPrefillOrHideModal,
+    CreateFieldContext,
+    FormViewSidebarField,
+  },
   mixins: [formViewHelpers],
   props: {
+    database: {
+      type: Object,
+      required: true,
+    },
     table: {
       type: Object,
       required: true,
@@ -99,10 +127,28 @@ export default {
       type: Boolean,
       required: true,
     },
+    allFieldsInTable: {
+      type: Array,
+      required: true,
+    },
+  },
+  computed: {
+    modeType() {
+      return this.$registry.get('formViewMode', this.view.mode)
+    },
+    isDeactivated() {
+      return (
+        !this.readOnly &&
+        this.modeType.isDeactivated(this.database.workspace.id)
+      )
+    },
   },
   methods: {
     order(order) {
       this.$emit('ordered-fields', order)
+    },
+    showFormPrefillOrHideModal() {
+      this.$refs.formPrefillOrHideModal.show()
     },
   },
 }

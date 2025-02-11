@@ -5,18 +5,39 @@ import BigNumber from 'bignumber.js'
 
 import { uuid } from '@baserow/modules/core/utils/string'
 import { clone } from '@baserow/modules/core/utils/object'
+import { GroupTaskQueue } from '@baserow/modules/core/utils/queue'
 import ViewService from '@baserow/modules/database/services/view'
 import GridService from '@baserow/modules/database/services/view/grid'
 import RowService from '@baserow/modules/database/services/row'
 import {
   calculateSingleRowSearchMatches,
+  extractRowMetadata,
   getRowSortFunction,
   matchSearchFilters,
+  getFilters,
+  getGroupBy,
+  getOrderBy,
+  canRowsBeOptimisticallyUpdatedInView,
 } from '@baserow/modules/database/utils/view'
 import { RefreshCancelledError } from '@baserow/modules/core/errors'
+import {
+  prepareRowForRequest,
+  prepareNewOldAndUpdateRequestValues,
+  extractRowReadOnlyValues,
+  updateRowMetadataType,
+  getRowMetadata,
+} from '@baserow/modules/database/utils/row'
+import { getDefaultSearchModeFromEnv } from '@baserow/modules/database/utils/search'
+import { fieldValuesAreEqualInObjects } from '@baserow/modules/database/utils/groupBy'
 
-export function populateRow(row) {
+const ORDER_STEP = '1'
+const ORDER_STEP_BEFORE = '0.00000000000000000001'
+const REFRESH_ROW_DELAY = 1000
+
+export function populateRow(row, metadata = {}) {
   row._ = {
+    metadata: getRowMetadata(row, metadata),
+    persistentId: uuid(),
     loading: false,
     hover: false,
     selectedBy: [],
@@ -33,12 +54,54 @@ export function populateRow(row) {
     selected: false,
     selectedFieldId: -1,
   }
+
   return row
 }
 
+const updatePositionFn = {
+  previous: (rowIndex, fieldIndex) => {
+    return [rowIndex, fieldIndex - 1]
+  },
+  next: (rowIndex, fieldIndex) => {
+    return [rowIndex, fieldIndex + 1]
+  },
+  above: (rowIndex, fieldIndex) => {
+    return [rowIndex - 1, fieldIndex]
+  },
+  below: (rowIndex, fieldIndex) => {
+    return [rowIndex + 1, fieldIndex]
+  },
+}
+
+function getPendingOperationKey(fieldId, rowId) {
+  return `${fieldId}-${rowId}`
+}
+
 export const state = () => ({
+  // Indicates if multiple cell selection is active
+  multiSelectActive: false,
+  // Indicates if the user is clicking and holding the mouse over a cell
+  multiSelectHolding: false,
+  /**
+   * The indexes for head and tail cells in a multi-select grid.
+   * Multi-Select works by tracking four different indexes, these are:
+   *   - The field and row index for the first cell selected, known as the head.
+   *   - The field and row index for the last cell selected, known as the tail.
+   * All the cells between the head and tail cells are later also calculated as selected.
+   */
+  multiSelectHeadRowIndex: -1,
+  multiSelectHeadFieldIndex: -1,
+  multiSelectTailRowIndex: -1,
+  multiSelectTailFieldIndex: -1,
+  // Keep the original row and field index to remember where the selection began
+  multiSelectStartRowIndex: -1,
+  multiSelectStartFieldIndex: -1,
   // The last used grid id.
   lastGridId: -1,
+  // If true, ad hoc filtering is used instead of persistent one
+  adhocFiltering: false,
+  // If true, ad hoc sorting is used
+  adhocSorting: false,
   // Contains the custom field options per view. Things like the field width are
   // stored here.
   fieldOptions: {},
@@ -76,6 +139,13 @@ export const state = () => ({
   // entirely out. When false no server filter will be applied and rows which do not
   // have any matching cells will still be displayed.
   hideRowsNotMatchingSearch: true,
+  fieldAggregationData: {},
+  activeGroupBys: [],
+  groupByMetadata: {},
+  // Contains a fieldId and rowId string pair that looks like `{fieldId}-{rowId}`. If
+  // in the array, then that cell is a loading state. This is for example used for
+  // fields that use a background worker to compute the value like the AI field.
+  pendingFieldOps: {},
 })
 
 export const mutations = {
@@ -92,19 +162,32 @@ export const mutations = {
     state.addRowHover = false
     state.activeSearchTerm = ''
     state.hideRowsNotMatchingSearch = true
+    state.pendingFieldOps = {}
+  },
+  SET_ACTIVE_GROUP_BYS(state, groupBys) {
+    state.activeGroupBys = groupBys
   },
   SET_SEARCH(state, { activeSearchTerm, hideRowsNotMatchingSearch }) {
-    state.activeSearchTerm = activeSearchTerm
+    state.activeSearchTerm = activeSearchTerm.trim()
     state.hideRowsNotMatchingSearch = hideRowsNotMatchingSearch
   },
   SET_LAST_GRID_ID(state, gridId) {
     state.lastGridId = gridId
+  },
+  SET_ADHOC_FILTERING(state, adhocFiltering) {
+    state.adhocFiltering = adhocFiltering
+  },
+  SET_ADHOC_SORTING(state, adhocSorting) {
+    state.adhocSorting = adhocSorting
   },
   SET_SCROLL_TOP(state, scrollTop) {
     state.scrollTop = scrollTop
   },
   SET_WINDOW_HEIGHT(state, value) {
     state.windowHeight = value
+  },
+  SET_ROW_PADDING(state, value) {
+    state.rowPadding = value
   },
   SET_BUFFER_START_INDEX(state, value) {
     state.bufferStartIndex = value
@@ -160,6 +243,39 @@ export const mutations = {
   UPDATE_ALL_FIELD_OPTIONS(state, fieldOptions) {
     state.fieldOptions = _.merge({}, state.fieldOptions, fieldOptions)
   },
+  /**
+   * Only adds the new field options and removes the deleted ones.
+   * Existing field options will be modified only if they are important
+   * for public view sharing.
+   */
+  REPLACE_PUBLIC_FIELD_OPTIONS(state, fieldOptions) {
+    // Add the missing field options or modify existing ones
+    Object.keys(fieldOptions).forEach((key) => {
+      const exists = Object.prototype.hasOwnProperty.call(
+        state.fieldOptions,
+        key
+      )
+      if (exists) {
+        const propsToUpdate = ['aggregation_raw_type', 'aggregation_type']
+        const singleFieldOptions = state.fieldOptions[key]
+        Object.keys(singleFieldOptions).forEach((optionKey) => {
+          if (propsToUpdate.includes(optionKey)) {
+            state.fieldOptions[key][optionKey] = fieldOptions[key][optionKey]
+          }
+        })
+      } else {
+        Vue.set(state.fieldOptions, key, fieldOptions[key])
+      }
+    })
+
+    // Remove the deleted ones.
+    Object.keys(state.fieldOptions).forEach((key) => {
+      const exists = Object.prototype.hasOwnProperty.call(fieldOptions, key)
+      if (!exists) {
+        Vue.delete(state.fieldOptions, key)
+      }
+    })
+  },
   UPDATE_FIELD_OPTIONS_OF_FIELD(state, { fieldId, values }) {
     if (Object.prototype.hasOwnProperty.call(state.fieldOptions, fieldId)) {
       Object.assign(state.fieldOptions[fieldId], values)
@@ -171,7 +287,7 @@ export const mutations = {
   },
   DELETE_FIELD_OPTIONS(state, fieldId) {
     if (Object.prototype.hasOwnProperty.call(state.fieldOptions, fieldId)) {
-      delete state.fieldOptions[fieldId]
+      Vue.delete(state.fieldOptions, fieldId)
     }
   },
   SET_ROW_HOVER(state, { row, value }) {
@@ -223,15 +339,50 @@ export const mutations = {
       }
     })
   },
+  SET_MULTISELECT_START_ROW_INDEX(state, value) {
+    state.multiSelectStartRowIndex = value
+  },
+  SET_MULTISELECT_START_FIELD_INDEX(state, value) {
+    state.multiSelectStartFieldIndex = value
+  },
+  UPDATE_MULTISELECT(state, { position, rowIndex, fieldIndex }) {
+    if (position === 'head') {
+      state.multiSelectHeadRowIndex = rowIndex
+      state.multiSelectHeadFieldIndex = fieldIndex
+    } else if (position === 'tail') {
+      state.multiSelectTailRowIndex = rowIndex
+      state.multiSelectTailFieldIndex = fieldIndex
+    }
+  },
+  SET_MULTISELECT_HOLDING(state, value) {
+    state.multiSelectHolding = value
+  },
+  SET_MULTISELECT_ACTIVE(state, value) {
+    state.multiSelectActive = value
+  },
+  CLEAR_MULTISELECT(state) {
+    state.multiSelectActive = false
+    state.multiSelectHolding = false
+    state.multiSelectHeadRowIndex = -1
+    state.multiSelectHeadFieldIndex = -1
+    state.multiSelectTailRowIndex = -1
+    state.multiSelectTailFieldIndex = -1
+  },
+  CLEAR_MULTISELECT_START(state) {
+    state.multiSelectStartRowIndex = -1
+    state.multiSelectStartFieldIndex = -1
+  },
   ADD_FIELD_TO_ROWS_IN_BUFFER(state, { field, value }) {
     const name = `field_${field.id}`
-    state.rows.forEach((row) => {
+    // We have to replace all the rows by using the map function to make it
+    // reactive and update immediately. If we don't do this, the value in the
+    // field components of the grid and modal don't always have the correct value
+    // binding.
+    state.rows = state.rows.map((row) => {
       if (!Object.prototype.hasOwnProperty.call(row, name)) {
-        // We have to use the Vue.set function here to make it reactive immediately.
-        // If we don't do this the value in the field components of the grid and modal
-        // don't have the correct value and will act strange.
-        Vue.set(row, name, value)
+        row[`field_${field.id}`] = value
       }
+      return { ...row }
     })
   },
   DECREASE_ORDERS_IN_BUFFER_LOWER_THAN(state, existingOrder) {
@@ -243,37 +394,29 @@ export const mutations = {
     state.rows.forEach((row) => {
       const order = new BigNumber(row.order)
       if (order.isGreaterThan(min) && order.isLessThanOrEqualTo(max)) {
-        row.order = order
-          .minus(new BigNumber('0.00000000000000000001'))
-          .toString()
+        row.order = order.minus(new BigNumber(ORDER_STEP_BEFORE)).toString()
       }
     })
   },
-  INSERT_NEW_ROW_IN_BUFFER_AT_INDEX(state, { row, index }) {
-    state.count++
-    state.bufferLimit++
-
-    // If another row with the same order already exists, then we need to decrease all
-    // the other orders that are within the range by '0.00000000000000000001'.
-    if (
-      state.rows.findIndex((r) => r.id !== row.id && r.order === row.order) > -1
-    ) {
-      const min = new BigNumber(row.order).integerValue(BigNumber.ROUND_FLOOR)
-      const max = new BigNumber(row.order)
-
-      // Decrease all the orders that have already have been inserted before the same
-      // row.
-      state.rows.forEach((row) => {
-        const order = new BigNumber(row.order)
-        if (order.isGreaterThan(min) && order.isLessThanOrEqualTo(max)) {
-          row.order = order
-            .minus(new BigNumber('0.00000000000000000001'))
-            .toString()
-        }
-      })
+  INSERT_NEW_ROWS_IN_BUFFER_AT_INDEX(state, { rows, index }) {
+    if (rows.length === 0) {
+      return
     }
 
-    state.rows.splice(index, 0, row)
+    const potentialNewBufferLimit = state.bufferLimit + rows.length
+    const maximumBufferLimit = state.bufferRequestSize * 3
+
+    state.count += rows.length
+    state.bufferLimit =
+      potentialNewBufferLimit > maximumBufferLimit
+        ? maximumBufferLimit
+        : potentialNewBufferLimit
+
+    // Insert the new rows
+    state.rows.splice(index, 0, ...rows)
+
+    // We might have too many rows inserted now
+    state.rows = state.rows.slice(0, state.bufferLimit)
   },
   INSERT_EXISTING_ROW_IN_BUFFER_AT_INDEX(state, { row, index }) {
     state.rows.splice(index, 0, row)
@@ -284,22 +427,49 @@ export const mutations = {
       state.rows.splice(index, 0, state.rows.splice(oldIndex, 1)[0])
     }
   },
-  UPDATE_ROW_IN_BUFFER(state, { row, values }) {
+  UPDATE_ROW_IN_BUFFER(state, { row, values, metadata = false }) {
     const index = state.rows.findIndex((item) => item.id === row.id)
     if (index !== -1) {
-      Object.assign(state.rows[index], values)
+      const existingRowState = state.rows[index]
+      Object.assign(existingRowState, values)
+      if (metadata) {
+        existingRowState._.metadata = metadata
+      }
     }
+  },
+  UPDATE_ROW_VALUES(state, { row, values }) {
+    Object.assign(row, values)
   },
   UPDATE_ROW_FIELD_VALUE(state, { row, field, value }) {
     row[`field_${field.id}`] = value
   },
-  FINALIZE_ROW_IN_BUFFER(state, { oldId, id, order }) {
-    const index = state.rows.findIndex((item) => item.id === oldId)
-    if (index !== -1) {
-      state.rows[index].id = id
-      state.rows[index].order = order
-      state.rows[index]._.loading = false
+  UPDATE_ROW_METADATA(state, { row, rowMetadataType, updateFunction }) {
+    updateRowMetadataType(row, rowMetadataType, updateFunction)
+  },
+  FINALIZE_ROWS_IN_BUFFER(state, { oldRows, newRows, fields }) {
+    const stateRowsCopy = { ...state.rows }
+
+    for (let i = 0; i < oldRows.length; i++) {
+      const oldRow = oldRows[i]
+      const newRow = newRows[i]
+
+      const index = state.rows.findIndex((row) => row.id === oldRow.id)
+
+      if (index === -1) {
+        continue
+      }
+
+      stateRowsCopy[index].id = newRow.id
+      stateRowsCopy[index].order = new BigNumber(newRow.order)
+      stateRowsCopy[index]._.loading = false
+      Object.keys(newRow).forEach((key) => {
+        if (fields.includes(key)) {
+          stateRowsCopy[index][key] = newRow[key]
+        }
+      })
     }
+
+    this.state.rows = stateRowsCopy
   },
   /**
    * Deletes a row of which we are sure that it is in the buffer right now.
@@ -321,20 +491,167 @@ export const mutations = {
       state.rows.splice(index, 1)
     }
   },
+  SET_FIELD_AGGREGATION_DATA(state, { fieldId, value: newValue }) {
+    const current = state.fieldAggregationData[fieldId] || {
+      loading: false,
+    }
+
+    state.fieldAggregationData = {
+      ...state.fieldAggregationData,
+      [fieldId]: { ...current, value: newValue },
+    }
+  },
+  SET_FIELD_AGGREGATION_DATA_LOADING(
+    state,
+    { fieldId, value: newLoadingValue }
+  ) {
+    const current = state.fieldAggregationData[fieldId] || {
+      value: null,
+    }
+
+    state.fieldAggregationData = {
+      ...state.fieldAggregationData,
+      [fieldId]: { ...current, loading: newLoadingValue },
+    }
+  },
+  /**
+   * Overwrites the group by metadata. This should be done when all the rows in the
+   * buffer are refreshed.
+   */
+  SET_GROUP_BY_METADATA(state, metadata) {
+    state.groupByMetadata = metadata
+  },
+  /**
+   * Merges the existing group by metadata and the newly provided metadata. If a
+   * count for the value combination already exists, it will be updated, otherwise
+   * it will be created.
+   */
+  UPDATE_GROUP_BY_METADATA(state, newMetadata) {
+    const existingMetadata = state.groupByMetadata
+
+    const getFields = (object) => {
+      const newObject = {}
+      Object.keys(object)
+        .filter((key) => key.startsWith('field_'))
+        .forEach((key) => {
+          newObject[key] = object[key]
+        })
+      return newObject
+    }
+
+    Object.keys(newMetadata).forEach((newGroupField) => {
+      newMetadata[newGroupField].forEach((newGroupEntry) => {
+        const newGroupEntryValues = getFields(newGroupEntry)
+        const existingIndex = existingMetadata[newGroupField].findIndex(
+          (existingGroupEntry) => {
+            const existingGroupEntryValues = getFields(existingGroupEntry)
+            return _.isEqual(newGroupEntryValues, existingGroupEntryValues)
+          }
+        )
+
+        if (existingIndex !== -1) {
+          Vue.set(existingMetadata[newGroupField], existingIndex, newGroupEntry)
+        } else {
+          existingMetadata[newGroupField].push(newGroupEntry)
+        }
+      })
+    })
+  },
+  /**
+   * Increases or decreases the count of all group entries that match the row values.
+   */
+  UPDATE_GROUP_BY_METADATA_COUNT(
+    state,
+    { fields, registry, row, increase, decrease }
+  ) {
+    const groupBys = state.activeGroupBys
+    const existingMetadata = state.groupByMetadata
+
+    groupBys.forEach((groupBy, groupByIndex) => {
+      let updated = false
+      const groupByFields = groupBys
+        .slice(0, groupByIndex + 1)
+        .map((groupBy) => {
+          return fields.find((f) => f.id === groupBy.field)
+        })
+      const entries = existingMetadata[`field_${groupBy.field}`] || []
+      entries.forEach((entry, index) => {
+        const equal = fieldValuesAreEqualInObjects(
+          groupByFields,
+          registry,
+          entry,
+          row,
+          true
+        )
+        if (equal) {
+          let count = entry.count
+          if (increase) {
+            count += 1
+          }
+          if (decrease) {
+            count -= 1
+          }
+
+          Vue.set(entry, 'count', count)
+          updated = true
+        }
+      })
+
+      if (!updated && increase) {
+        const newEntry = { count: 1 }
+        groupByFields.forEach((field) => {
+          const key = `field_${field.id}`
+          const fieldType = registry.get('field', field.type)
+          newEntry[key] = fieldType.getGroupValueFromRowValue(field, row[key])
+        })
+        existingMetadata[`field_${groupBy.field}`].push(newEntry)
+      }
+    })
+  },
+  SET_PENDING_FIELD_OPERATIONS(state, { fieldId, rowIds, value }) {
+    const addKey = (fieldId, rowId) => {
+      const key = getPendingOperationKey(fieldId, rowId)
+      Vue.set(state.pendingFieldOps, key, [fieldId, rowId])
+    }
+    const deleteKey = (fieldId, rowId) => {
+      const key = getPendingOperationKey(fieldId, rowId)
+      Vue.delete(state.pendingFieldOps, key)
+    }
+    const operation = value ? addKey : deleteKey
+
+    rowIds.forEach((rowId) => operation(fieldId, rowId))
+  },
+  CLEAR_PENDING_FIELD_OPERATIONS(state, { fieldIds, rowId }) {
+    fieldIds.forEach((fieldId) => {
+      const key = getPendingOperationKey(fieldId, rowId)
+      Vue.delete(state.pendingFieldOps, key)
+    })
+  },
+  UPDATE_ROW_HEIGHT(state, value) {
+    state.rowHeight = value
+  },
 }
 
-// Contains the timeout needed for the delayed delayed scroll top action.
-let fireTimeout = null
-// Contains a timestamp of the last fire of the related actions to the delayed
-// scroll top action.
-let lastFire = null
-// Contains the
+// Contains the info needed for the delayed scroll top action.
+const fireScrollTop = {
+  last: Date.now(),
+  timeout: null,
+  processing: false,
+  distance: 0,
+}
+
+const createAndUpdateRowQueue = new GroupTaskQueue()
+
+// Contains the last row request to be able to cancel it.
 let lastRequest = null
 let lastRequestOffset = null
 let lastRequestLimit = null
 let lastRefreshRequest = null
-let lastRefreshRequestSource = null
-let lastSource = null
+let lastRefreshRequestController = null
+let lastQueryController = null
+
+// We want to cancel previous aggregation request before creating a new one.
+const lastAggregationRequest = { request: null, controller: null }
 
 export const actions = {
   /**
@@ -344,11 +661,12 @@ export const actions = {
    * anything other then we already have or waiting for a new request will be made.
    */
   fetchByScrollTop(
-    { commit, getters, dispatch },
-    { scrollTop, fields, primary }
+    { commit, getters, rootGetters, dispatch },
+    { scrollTop, fields }
   ) {
     const windowHeight = getters.getWindowHeight
     const gridId = getters.getLastGridId
+    const view = rootGetters['view/get'](getters.getLastGridId)
 
     // Calculate what the middle row index of the visible window based on the scroll
     // top.
@@ -432,28 +750,36 @@ export const actions = {
       requestLimit > 0 &&
       (lastRequestOffset !== requestOffset || lastRequestLimit !== requestLimit)
     ) {
-      // If another request is runnig we need to cancel that one because it won't
+      fireScrollTop.processing = true
+      // If another request is running we need to cancel that one because it won't
       // what we need at the moment.
       if (lastRequest !== null) {
-        lastSource.cancel('Canceled in favor of new request')
+        lastQueryController.abort()
       }
 
       // Doing the actual request and remember what we are requesting so we can compare
       // it when making a new request.
       lastRequestOffset = requestOffset
       lastRequestLimit = requestLimit
-      lastSource = axios.CancelToken.source()
+      lastQueryController = new AbortController()
       lastRequest = GridService(this.$client)
         .fetchRows({
           gridId,
           offset: requestOffset,
           limit: requestLimit,
-          cancelToken: lastSource.token,
+          signal: lastQueryController.signal,
           search: getters.getServerSearchTerm,
+          searchMode: getDefaultSearchModeFromEnv(this.$config),
+          publicUrl: rootGetters['page/view/public/getIsPublic'],
+          publicAuthToken: rootGetters['page/view/public/getAuthToken'],
+          groupBy: getGroupBy(rootGetters, getters.getLastGridId),
+          orderBy: getOrderBy(view, getters.getAdhocSorting),
+          filters: getFilters(view, getters.getAdhocFiltering),
         })
         .then(({ data }) => {
-          data.results.forEach((part, index) => {
-            populateRow(data.results[index])
+          data.results.forEach((row) => {
+            const metadata = extractRowMetadata(data, row.id)
+            populateRow(row, metadata)
           })
           commit('ADD_ROWS', {
             rows: data.results,
@@ -463,15 +789,18 @@ export const actions = {
             bufferStartIndex,
             bufferLimit,
           })
+          commit('UPDATE_GROUP_BY_METADATA', data.group_by_metadata || {})
           dispatch('visibleByScrollTop')
-          dispatch('updateSearch', { fields, primary })
+          dispatch('updateSearch', { fields })
           lastRequest = null
+          fireScrollTop.processing = false
         })
         .catch((error) => {
           if (!axios.isCancel(error)) {
             lastRequest = null
             throw error
           }
+          fireScrollTop.processing = false
         })
     }
   },
@@ -547,24 +876,34 @@ export const actions = {
    * of calls. Therefore it will dispatch the related actions, but only every 100
    * milliseconds to prevent calling the actions who do a lot of calculating a lot.
    */
-  fetchByScrollTopDelayed({ dispatch }, { scrollTop, fields, primary }) {
+  fetchByScrollTopDelayed({ dispatch }, { scrollTop, fields }) {
+    const now = Date.now()
+
     const fire = (scrollTop) => {
-      lastFire = new Date().getTime()
+      fireScrollTop.distance = scrollTop
+      fireScrollTop.last = now
       dispatch('fetchByScrollTop', {
         scrollTop,
         fields,
-        primary,
       })
       dispatch('visibleByScrollTop', scrollTop)
     }
 
-    const difference = new Date().getTime() - lastFire
-    if (difference > 100) {
-      clearTimeout(fireTimeout)
+    const distance = Math.abs(scrollTop - fireScrollTop.distance)
+    const timeDelta = now - fireScrollTop.last
+    const velocity = distance / timeDelta
+
+    if (!fireScrollTop.processing && timeDelta > 100 && velocity < 2.5) {
+      clearTimeout(fireScrollTop.timeout)
       fire(scrollTop)
     } else {
-      clearTimeout(fireTimeout)
-      fireTimeout = setTimeout(() => {
+      // Allow velocity calculation on last ~100 ms
+      if (timeDelta > 100) {
+        fireScrollTop.distance = scrollTop
+        fireScrollTop.last = now
+      }
+      clearTimeout(fireScrollTop.timeout)
+      fireScrollTop.timeout = setTimeout(() => {
         fire(scrollTop)
       }, 100)
     }
@@ -573,15 +912,23 @@ export const actions = {
    * Fetches an initial set of rows and adds that data to the store.
    */
   async fetchInitial(
-    { dispatch, commit, getters },
-    { gridId, fields, primary }
+    { dispatch, commit, getters, rootGetters },
+    { gridId, fields, adhocFiltering, adhocSorting }
   ) {
+    // Reset scrollTop when switching table
+    fireScrollTop.distance = 0
+    fireScrollTop.last = Date.now()
+    fireScrollTop.processing = false
+
     commit('SET_SEARCH', {
       activeSearchTerm: '',
       hideRowsNotMatchingSearch: true,
     })
     commit('SET_LAST_GRID_ID', gridId)
+    commit('SET_ADHOC_FILTERING', adhocFiltering)
+    commit('SET_ADHOC_SORTING', adhocSorting)
 
+    const view = rootGetters['view/get'](getters.getLastGridId)
     const limit = getters.getBufferRequestSize * 2
     const { data } = await GridService(this.$client).fetchRows({
       gridId,
@@ -589,9 +936,16 @@ export const actions = {
       limit,
       includeFieldOptions: true,
       search: getters.getServerSearchTerm,
+      searchMode: getDefaultSearchModeFromEnv(this.$config),
+      publicUrl: rootGetters['page/view/public/getIsPublic'],
+      publicAuthToken: rootGetters['page/view/public/getAuthToken'],
+      groupBy: getGroupBy(rootGetters, getters.getLastGridId),
+      orderBy: getOrderBy(view, adhocSorting),
+      filters: getFilters(view, adhocFiltering),
     })
-    data.results.forEach((part, index) => {
-      populateRow(data.results[index])
+    data.results.forEach((row) => {
+      const metadata = extractRowMetadata(data, row.id)
+      populateRow(row, metadata)
     })
     commit('CLEAR_ROWS')
     commit('ADD_ROWS', {
@@ -610,7 +964,8 @@ export const actions = {
       top: 0,
     })
     commit('REPLACE_ALL_FIELD_OPTIONS', data.field_options)
-    dispatch('updateSearch', { fields, primary })
+    commit('SET_GROUP_BY_METADATA', data.group_by_metadata || {})
+    dispatch('updateSearch', { fields })
   },
   /**
    * Refreshes the current state with fresh data. It keeps the scroll offset the same
@@ -619,19 +974,26 @@ export const actions = {
    * are provided in the refreshEvent.
    */
   refresh(
-    { dispatch, commit, getters },
-    { fields, primary, includeFieldOptions = false }
+    { dispatch, commit, getters, rootGetters },
+    { view, fields, adhocFiltering, adhocSorting, includeFieldOptions = false }
   ) {
+    commit('SET_ADHOC_FILTERING', adhocFiltering)
+    commit('SET_ADHOC_SORTING', adhocSorting)
     const gridId = getters.getLastGridId
+
     if (lastRefreshRequest !== null) {
-      lastRefreshRequestSource.cancel('Cancelled in favor of new request')
+      lastRefreshRequestController.abort()
     }
-    lastRefreshRequestSource = axios.CancelToken.source()
+    lastRefreshRequestController = new AbortController()
     lastRefreshRequest = GridService(this.$client)
       .fetchCount({
         gridId,
         search: getters.getServerSearchTerm,
-        cancelToken: lastRefreshRequestSource.token,
+        searchMode: getDefaultSearchModeFromEnv(this.$config),
+        signal: lastRefreshRequestController.signal,
+        publicUrl: rootGetters['page/view/public/getIsPublic'],
+        publicAuthToken: rootGetters['page/view/public/getAuthToken'],
+        filters: getFilters(view, adhocFiltering),
       })
       .then((response) => {
         const count = response.data.count
@@ -651,8 +1013,14 @@ export const actions = {
             offset,
             limit,
             includeFieldOptions,
-            cancelToken: lastRefreshRequestSource.token,
+            signal: lastRefreshRequestController.signal,
             search: getters.getServerSearchTerm,
+            searchMode: getDefaultSearchModeFromEnv(this.$config),
+            publicUrl: rootGetters['page/view/public/getIsPublic'],
+            publicAuthToken: rootGetters['page/view/public/getAuthToken'],
+            groupBy: getGroupBy(rootGetters, getters.getLastGridId),
+            orderBy: getOrderBy(view, adhocSorting),
+            filters: getFilters(view, adhocFiltering),
           })
           .then(({ data }) => ({
             data,
@@ -662,8 +1030,9 @@ export const actions = {
       .then(({ data, offset }) => {
         // If there are results we can replace the existing rows so that the user stays
         // at the same scroll offset.
-        data.results.forEach((part, index) => {
-          populateRow(data.results[index])
+        data.results.forEach((row) => {
+          const metadata = extractRowMetadata(data, row.id)
+          populateRow(row, metadata)
         })
         commit('ADD_ROWS', {
           rows: data.results,
@@ -673,10 +1042,19 @@ export const actions = {
           bufferStartIndex: offset,
           bufferLimit: data.results.length,
         })
-        dispatch('updateSearch', { fields, primary })
+        commit('SET_GROUP_BY_METADATA', data.group_by_metadata || {})
+        dispatch('updateSearch', { fields })
         if (includeFieldOptions) {
-          commit('REPLACE_ALL_FIELD_OPTIONS', data.field_options)
+          if (rootGetters['page/view/public/getIsPublic']) {
+            commit('REPLACE_PUBLIC_FIELD_OPTIONS', data.field_options)
+          } else {
+            commit('REPLACE_ALL_FIELD_OPTIONS', data.field_options)
+          }
         }
+        dispatch('correctMultiSelect')
+        dispatch('fetchAllFieldAggregationData', {
+          view,
+        })
         lastRefreshRequest = null
       })
       .catch((error) => {
@@ -689,78 +1067,231 @@ export const actions = {
       })
     return lastRefreshRequest
   },
+  updateActiveGroupBys({ commit }, groupBys) {
+    commit('SET_ACTIVE_GROUP_BYS', groupBys)
+  },
   /**
    * Updates the field options of a given field and also makes an API request to the
    * backend with the changed values. If the request fails the action is reverted.
    */
   async updateFieldOptionsOfField(
-    { commit, getters },
-    { field, values, oldValues }
+    { commit, getters, dispatch, rootGetters },
+    { field, values, oldValues, readOnly = false, undoRedoActionGroupId }
   ) {
-    const gridId = getters.getLastGridId
+    const previousOptions = getters.getAllFieldOptions[field.id]
+    let needAggregationValueUpdate = false
+
+    /**
+     * If the aggregation raw type has changed, we delete the corresponding the
+     * aggregation value from the store.
+     */
+    if (
+      Object.prototype.hasOwnProperty.call(values, 'aggregation_raw_type') &&
+      values.aggregation_raw_type !== previousOptions.aggregation_raw_type
+    ) {
+      needAggregationValueUpdate = true
+      commit('SET_FIELD_AGGREGATION_DATA', { fieldId: field.id, value: null })
+      commit('SET_FIELD_AGGREGATION_DATA_LOADING', {
+        fieldId: field.id,
+        value: true,
+      })
+    }
+
     commit('UPDATE_FIELD_OPTIONS_OF_FIELD', {
       fieldId: field.id,
       values,
     })
-    const updateValues = { field_options: {} }
-    updateValues.field_options[field.id] = values
 
-    try {
-      await ViewService(this.$client).updateFieldOptions({
-        viewId: gridId,
-        values: updateValues,
-      })
-    } catch (error) {
-      commit('UPDATE_FIELD_OPTIONS_OF_FIELD', {
-        fieldId: field.id,
-        values: oldValues,
-      })
-      throw error
+    const gridId = getters.getLastGridId
+    if (!readOnly) {
+      const updateValues = { field_options: {} }
+      updateValues.field_options[field.id] = values
+
+      try {
+        await ViewService(this.$client).updateFieldOptions({
+          viewId: gridId,
+          values: updateValues,
+          undoRedoActionGroupId,
+        })
+      } catch (error) {
+        commit('UPDATE_FIELD_OPTIONS_OF_FIELD', {
+          fieldId: field.id,
+          values: oldValues,
+        })
+        throw error
+      } finally {
+        if (needAggregationValueUpdate && values.aggregation_type) {
+          dispatch('fetchAllFieldAggregationData', { view: { id: gridId } })
+        }
+      }
     }
   },
   /**
    * Updates the field options of a given field in the store. So no API request to
    * the backend is made.
    */
-  setFieldOptionsOfField({ commit }, { field, values }) {
+  setFieldOptionsOfField({ commit, getters, dispatch }, { field, values }) {
     commit('UPDATE_FIELD_OPTIONS_OF_FIELD', {
       fieldId: field.id,
       values,
     })
+    dispatch('correctMultiSelect')
   },
   /**
    * Replaces all field options with new values and also makes an API request to the
    * backend with the changed values. If the request fails the action is reverted.
    */
   async updateAllFieldOptions(
-    { dispatch, getters },
-    { newFieldOptions, oldFieldOptions }
+    { dispatch, getters, rootGetters },
+    {
+      newFieldOptions,
+      oldFieldOptions,
+      readOnly = false,
+      undoRedoActionGroupId = null,
+    }
   ) {
-    const gridId = getters.getLastGridId
     dispatch('forceUpdateAllFieldOptions', newFieldOptions)
-    const updateValues = { field_options: newFieldOptions }
 
-    try {
-      await ViewService(this.$client).updateFieldOptions({
-        viewId: gridId,
-        values: updateValues,
-      })
-    } catch (error) {
-      dispatch('forceUpdateAllFieldOptions', oldFieldOptions)
-      throw error
+    const gridId = getters.getLastGridId
+    if (!readOnly) {
+      const updateValues = { field_options: newFieldOptions }
+
+      try {
+        await ViewService(this.$client).updateFieldOptions({
+          viewId: gridId,
+          values: updateValues,
+          undoRedoActionGroupId,
+        })
+      } catch (error) {
+        dispatch('forceUpdateAllFieldOptions', oldFieldOptions)
+        dispatch('correctMultiSelect')
+        throw error
+      }
     }
   },
   /**
    * Forcefully updates all field options without making a call to the backend.
    */
-  forceUpdateAllFieldOptions({ commit }, fieldOptions) {
+  forceUpdateAllFieldOptions({ commit, dispatch }, fieldOptions) {
     commit('UPDATE_ALL_FIELD_OPTIONS', fieldOptions)
+    dispatch('correctMultiSelect')
+  },
+  /**
+   * Fetch all field aggregation data from the server for this view. Set loading state
+   * to true while doing the query. Do nothing if this is a public view or if there is
+   * no aggregation at all. If the query goes in error, the values are set to `null`
+   * to prevent wrong information.
+   * If a request is already in progress, it is aborted in favour of the new one.
+   */
+  async fetchAllFieldAggregationData(
+    { rootGetters, getters, commit },
+    { view }
+  ) {
+    const isPublic = rootGetters['page/view/public/getIsPublic']
+    const search = getters.getActiveSearchTerm
+    const fieldOptions = getters.getAllFieldOptions
+    let atLeastOneAggregation = false
+
+    Object.entries(fieldOptions).forEach(([fieldId, options]) => {
+      if (options.aggregation_raw_type) {
+        commit('SET_FIELD_AGGREGATION_DATA_LOADING', {
+          fieldId,
+          value: true,
+        })
+        atLeastOneAggregation = true
+      }
+    })
+
+    if (!atLeastOneAggregation) {
+      return
+    }
+
+    try {
+      if (lastAggregationRequest.request !== null) {
+        lastAggregationRequest.controller.abort()
+      }
+
+      lastAggregationRequest.controller = new AbortController()
+
+      if (!isPublic) {
+        lastAggregationRequest.request = GridService(
+          this.$client
+        ).fetchFieldAggregations({
+          gridId: view.id,
+          filters: getFilters(view, getters.getAdhocFiltering),
+          search,
+          searchMode: getDefaultSearchModeFromEnv(this.$config),
+          signal: lastAggregationRequest.controller.signal,
+        })
+      } else {
+        lastAggregationRequest.request = GridService(
+          this.$client
+        ).fetchPublicFieldAggregations({
+          slug: view.slug,
+          publicAuthToken: rootGetters['page/view/public/getAuthToken'],
+          filters: getFilters(view, getters.getAdhocFiltering),
+          search,
+          searchMode: getDefaultSearchModeFromEnv(this.$config),
+          signal: lastAggregationRequest.controller.signal,
+        })
+      }
+
+      const { data } = await lastAggregationRequest.request
+      lastAggregationRequest.request = null
+
+      Object.entries(fieldOptions).forEach(([fieldId, options]) => {
+        if (options.aggregation_raw_type) {
+          commit('SET_FIELD_AGGREGATION_DATA', {
+            fieldId,
+            value: data[`field_${fieldId}`],
+          })
+        }
+      })
+
+      Object.entries(fieldOptions).forEach(([fieldId, options]) => {
+        if (options.aggregation_raw_type) {
+          commit('SET_FIELD_AGGREGATION_DATA_LOADING', {
+            fieldId,
+            value: false,
+          })
+        }
+      })
+    } catch (error) {
+      if (!axios.isCancel(error)) {
+        lastAggregationRequest.request = null
+
+        // Emptied the values
+        Object.entries(fieldOptions).forEach(([fieldId, options]) => {
+          if (options.aggregation_raw_type) {
+            commit('SET_FIELD_AGGREGATION_DATA', {
+              fieldId,
+              value: null,
+            })
+          }
+        })
+
+        // Remove loading state
+        Object.entries(fieldOptions).forEach(([fieldId, options]) => {
+          if (options.aggregation_raw_type) {
+            commit('SET_FIELD_AGGREGATION_DATA_LOADING', {
+              fieldId,
+              value: false,
+            })
+          }
+        })
+
+        throw error
+      }
+    }
   },
   /**
    * Updates the order of all the available field options. The provided order parameter
    * should be an array containing the field ids in the correct order.
    */
-  async updateFieldOptionsOrder({ commit, getters, dispatch }, { order }) {
+  async updateFieldOptionsOrder(
+    { commit, getters, dispatch },
+    { order, readOnly = false, undoRedoActionGroupId = null }
+  ) {
     const oldFieldOptions = clone(getters.getAllFieldOptions)
     const newFieldOptions = clone(getters.getAllFieldOptions)
 
@@ -785,22 +1316,405 @@ export const actions = {
     return await dispatch('updateAllFieldOptions', {
       oldFieldOptions,
       newFieldOptions,
+      readOnly,
+      undoRedoActionGroupId,
+    })
+  },
+  /**
+   * Move one field on the left or the right of the specified `fromField`
+   * by updating all the fieldOptions orders.
+   *
+   * @param {object} fieldToMove The field that is going to be moved.
+   * @param {string} position Set to 'left' to move the field to the left of the
+   *                          fromField. The field is moved to the right otherwise.
+   * @param {object} fromField We want to move the `fieldtoMove` relatively to this
+   *                           field.
+   *                           If `position` === 'left' the `fieldToMove` is going to be
+   *                           positioned at the left of the specified `fromField`
+   *                           otherwise to the right of this field.
+   * @param {string} undoRedoActionGroupId An optional undo/redo group action.
+   * @param {boolean} readOnly Set to true to not send the modification to the server.
+   */
+  async updateSingleFieldOptionOrder(
+    { getters, dispatch },
+    {
+      fieldToMove,
+      position = 'left',
+      fromField,
+      undoRedoActionGroupId = null,
+      readOnly = false,
+    }
+  ) {
+    const oldFieldOptions = clone(getters.getAllFieldOptions)
+    const newFieldOptions = clone(getters.getAllFieldOptions)
+
+    // Order field options by order then by fieldId
+    const orderedFieldOptions = Object.entries(newFieldOptions)
+      .map(([fieldIdStr, options]) => [parseInt(fieldIdStr), options])
+      .sort(([a, { order: orderA }], [b, { order: orderB }]) => {
+        // First by order.
+        if (orderA > orderB) {
+          return 1
+        } else if (orderA < orderB) {
+          return -1
+        }
+
+        return a - b
+      })
+
+    let index = 0
+    // Update order of all fieldOptions inserting the movedField to the right position
+    orderedFieldOptions.forEach(([fieldId, options]) => {
+      if (fieldId === fromField.id) {
+        // Update firstField and second field order
+        if (position === 'left') {
+          newFieldOptions[fieldToMove.id].order = index
+          newFieldOptions[fromField.id].order = index + 1
+        } else {
+          newFieldOptions[fromField.id].order = index
+          newFieldOptions[fieldToMove.id].order = index + 1
+        }
+        index += 2
+      } else if (fieldId !== fieldToMove.id) {
+        // Update all other field order
+        options.order = index
+        index += 1
+      }
+    })
+
+    return await dispatch('updateAllFieldOptions', {
+      oldFieldOptions,
+      newFieldOptions,
+      readOnly,
+      undoRedoActionGroupId,
     })
   },
   /**
    * Deletes the field options of the provided field id if they exist.
    */
-  forceDeleteFieldOptions({ commit }, fieldId) {
+  forceDeleteFieldOptions({ commit, dispatch }, fieldId) {
     commit('DELETE_FIELD_OPTIONS', fieldId)
+    dispatch('correctMultiSelect')
   },
-  setWindowHeight({ commit }, value) {
+  setWindowHeight({ dispatch, commit, getters }, value) {
     commit('SET_WINDOW_HEIGHT', value)
+    commit('SET_ROW_PADDING', Math.ceil(value / getters.getRowHeight / 2))
+    dispatch('visibleByScrollTop')
   },
   setAddRowHover({ commit }, value) {
     commit('SET_ADD_ROW_HOVER', value)
   },
-  setSelectedCell({ commit }, { rowId, fieldId }) {
+  setSelectedCell(
+    { commit, getters, rootGetters },
+    { rowId, fieldId, fields }
+  ) {
     commit('SET_SELECTED_CELL', { rowId, fieldId })
+
+    const rowIndex = getters.getRowIndexById(rowId)
+
+    if (rowIndex !== -1) {
+      commit('SET_MULTISELECT_START_ROW_INDEX', rowIndex)
+      const visibleFieldOptions = getters.getOrderedVisibleFieldOptions(fields)
+      commit(
+        'SET_MULTISELECT_START_FIELD_INDEX',
+        visibleFieldOptions.findIndex((f) => parseInt(f[0]) === fieldId)
+      )
+    }
+  },
+  setSelectedCellCancelledMultiSelect(
+    { commit, getters, rootGetters, dispatch },
+    { direction, fields }
+  ) {
+    const rowIndex = getters.getMultiSelectStartRowIndex
+    const fieldIndex = getters.getMultiSelectStartFieldIndex
+    const [newRowIndex, newFieldIndex] = updatePositionFn[direction](
+      rowIndex,
+      fieldIndex
+    )
+
+    const rows = getters.getAllRows
+    const visibleFieldEntries = getters.getOrderedVisibleFieldOptions(fields)
+    const row = rows[newRowIndex - getters.getBufferStartIndex]
+    const field = visibleFieldEntries[newFieldIndex]
+
+    if (row && field) {
+      dispatch('setSelectedCell', {
+        rowId: row.id,
+        fieldId: parseInt(field[0]),
+        fields,
+      })
+    } else {
+      const oldRow = rows[rowIndex - getters.getBufferStartIndex]
+      const oldField = visibleFieldEntries[fieldIndex]
+
+      if (oldRow && oldField) {
+        dispatch('setSelectedCell', {
+          rowId: oldRow.id,
+          fieldId: parseInt(oldField[0]),
+          fields,
+        })
+      }
+    }
+    dispatch('clearAndDisableMultiSelect')
+  },
+  setMultiSelectHolding({ commit }, value) {
+    commit('SET_MULTISELECT_HOLDING', value)
+  },
+  setMultiSelectActive({ commit }, value) {
+    commit('SET_MULTISELECT_ACTIVE', value)
+  },
+  clearAndDisableMultiSelect({ commit }) {
+    commit('CLEAR_MULTISELECT')
+    commit('SET_MULTISELECT_ACTIVE', false)
+  },
+  multiSelectStart({ getters, commit, dispatch }, { rowId, fieldIndex }) {
+    commit('CLEAR_MULTISELECT')
+
+    const rowIndex = getters.getRowIndexById(rowId)
+
+    // Set the head and tail index to highlight the first cell
+    dispatch('updateMultipleSelectIndexes', {
+      position: 'head',
+      rowIndex,
+      fieldIndex,
+    })
+    dispatch('updateMultipleSelectIndexes', {
+      position: 'tail',
+      rowIndex,
+      fieldIndex,
+    })
+    commit('CLEAR_MULTISELECT_START')
+    commit('SET_MULTISELECT_START_ROW_INDEX', rowIndex)
+    commit('SET_MULTISELECT_START_FIELD_INDEX', fieldIndex)
+
+    // Update the store to show that the mouse is being held for multi-select
+    commit('SET_MULTISELECT_HOLDING', true)
+    // Do not enable multi-select if only a single cell is selected
+    commit('SET_MULTISELECT_ACTIVE', false)
+  },
+  multiSelectShiftClick(
+    { state, getters, commit, dispatch },
+    { rowId, fieldIndex }
+  ) {
+    commit('SET_MULTISELECT_ACTIVE', true)
+    dispatch('setMultiSelectHeadOrTail', { rowId, fieldIndex })
+  },
+  multiSelectShiftChange({ getters, commit, dispatch }, { direction }) {
+    if (
+      getters.getMultiSelectStartRowIndex === -1 ||
+      getters.getMultiSelectStartFieldIndex === -1
+    ) {
+      return {
+        position: null,
+        rowIndex: -1,
+        fieldIndex: -1,
+      }
+    }
+
+    if (!getters.isMultiSelectActive) {
+      commit('SET_MULTISELECT_ACTIVE', true)
+      dispatch('updateMultipleSelectIndexes', {
+        position: 'head',
+        rowIndex: getters.getMultiSelectStartRowIndex,
+        fieldIndex: getters.getMultiSelectStartFieldIndex,
+      })
+      dispatch('updateMultipleSelectIndexes', {
+        position: 'tail',
+        rowIndex: getters.getMultiSelectStartRowIndex,
+        fieldIndex: getters.getMultiSelectStartFieldIndex,
+      })
+      commit('SET_SELECTED_CELL', { rowId: -1, fieldId: -1 })
+    }
+
+    const tailRowIndex = getters.getMultiSelectTailRowIndex
+    const tailFieldIndex = getters.getMultiSelectTailFieldIndex
+    const headRowIndex = getters.getMultiSelectHeadRowIndex
+    const headFieldIndex = getters.getMultiSelectHeadFieldIndex
+
+    const [newRowTailIndex, newFieldTailIndex] = updatePositionFn[direction](
+      tailRowIndex,
+      tailFieldIndex
+    )
+    const [newRowHeadIndex, newFieldHeadIndex] = updatePositionFn[direction](
+      headRowIndex,
+      headFieldIndex
+    )
+    let positionToMove
+
+    if (direction === 'below') {
+      if (headRowIndex === getters.getMultiSelectStartRowIndex) {
+        positionToMove = 'tail'
+      } else {
+        positionToMove = 'head'
+      }
+    }
+
+    if (direction === 'above') {
+      if (tailRowIndex === getters.getMultiSelectStartRowIndex) {
+        positionToMove = 'head'
+      } else {
+        positionToMove = 'tail'
+      }
+    }
+
+    if (direction === 'previous') {
+      if (tailFieldIndex === getters.getMultiSelectStartFieldIndex) {
+        positionToMove = 'head'
+      } else {
+        positionToMove = 'tail'
+      }
+    }
+
+    if (direction === 'next') {
+      if (headFieldIndex === getters.getMultiSelectStartFieldIndex) {
+        positionToMove = 'tail'
+      } else {
+        positionToMove = 'head'
+      }
+    }
+
+    dispatch('updateMultipleSelectIndexes', {
+      position: positionToMove,
+      rowIndex: positionToMove === 'tail' ? newRowTailIndex : newRowHeadIndex,
+      fieldIndex:
+        positionToMove === 'tail' ? newFieldTailIndex : newFieldHeadIndex,
+    })
+
+    return {
+      position: positionToMove,
+      rowIndex: positionToMove === 'tail' ? newRowTailIndex : newRowHeadIndex,
+      fieldIndex:
+        positionToMove === 'tail' ? newFieldTailIndex : newFieldHeadIndex,
+    }
+  },
+  multiSelectHold({ getters, commit, dispatch }, { rowId, fieldIndex }) {
+    if (getters.isMultiSelectHolding) {
+      dispatch('setMultiSelectHeadOrTail', { rowId, fieldIndex })
+    }
+  },
+  setMultiSelectHeadOrTail(
+    { getters, commit, dispatch },
+    { rowId, fieldIndex }
+  ) {
+    commit('SET_SELECTED_CELL', { rowId: -1, fieldId: -1 })
+
+    const rowIndex = getters.getRowIndexById(rowId)
+    const startRowIndex = getters.getMultiSelectStartRowIndex
+    const startFieldIndex = getters.getMultiSelectStartFieldIndex
+    const newHeadRowIndex = Math.min(startRowIndex, rowIndex)
+    const newHeadFieldIndex = Math.min(startFieldIndex, fieldIndex)
+    const newTailRowIndex = Math.max(startRowIndex, rowIndex)
+    const newTailFieldIndex = Math.max(startFieldIndex, fieldIndex)
+
+    dispatch('updateMultipleSelectIndexes', {
+      position: 'head',
+      rowIndex: newHeadRowIndex,
+      fieldIndex: newHeadFieldIndex,
+    })
+
+    dispatch('updateMultipleSelectIndexes', {
+      position: 'tail',
+      rowIndex: newTailRowIndex,
+      fieldIndex: newTailFieldIndex,
+    })
+
+    commit('SET_MULTISELECT_ACTIVE', true)
+  },
+  correctMultiSelect({ getters, commit }) {
+    const headRowIndex = getters.getMultiSelectHeadRowIndex
+    const tailRowIndex = getters.getMultiSelectTailRowIndex
+
+    const headFieldIndex = getters.getMultiSelectHeadFieldIndex
+    const tailFieldIndex = getters.getMultiSelectTailFieldIndex
+
+    const startRowIndex = getters.getMultiSelectStartRowIndex
+    const startFieldIndex = getters.getMultiSelectStartFieldIndex
+
+    const maxRowIndex = getters.getRowsLength + getters.getBufferStartIndex - 1
+    const maxFieldIndex = getters.getNumberOfVisibleFields - 1
+
+    if (headRowIndex > maxRowIndex || headFieldIndex > maxFieldIndex) {
+      commit('CLEAR_MULTISELECT')
+      commit('CLEAR_MULTISELECT_START')
+      return
+    }
+
+    commit('UPDATE_MULTISELECT', {
+      position: 'tail',
+      rowIndex: tailRowIndex > maxRowIndex ? maxRowIndex : tailRowIndex,
+      fieldIndex:
+        tailFieldIndex > maxFieldIndex ? maxFieldIndex : tailFieldIndex,
+    })
+
+    const newStartRowIndex =
+      startRowIndex > maxRowIndex ? maxRowIndex : startRowIndex
+    const newStartFieldIndex =
+      startFieldIndex > maxFieldIndex ? maxFieldIndex : startFieldIndex
+
+    commit('SET_MULTISELECT_START_ROW_INDEX', newStartRowIndex)
+    commit('SET_MULTISELECT_START_FIELD_INDEX', newStartFieldIndex)
+  },
+  /**
+   * Returns the fields and rows necessaries to extract data from the selection.
+   * It only contains the rows and fields selected by the multiple select.
+   * If one or more rows are not in the buffer, they are fetched from the backend.
+   */
+  async getCurrentSelection({ dispatch, getters }, { fields }) {
+    const [minFieldIndex, maxFieldIndex] =
+      getters.getMultiSelectFieldIndexSorted
+
+    let rows = []
+    fields = fields.slice(minFieldIndex, maxFieldIndex + 1)
+
+    if (getters.areMultiSelectRowsWithinBuffer) {
+      rows = getters.getSelectedRows
+    } else {
+      // Fetch rows from backend
+      const [minRowIndex, maxRowIndex] = getters.getMultiSelectRowIndexSorted
+      const limit = maxRowIndex - minRowIndex + 1
+      rows = await dispatch('fetchRowsByIndex', {
+        startIndex: minRowIndex,
+        limit,
+        fields,
+      })
+    }
+
+    return [fields, rows]
+  },
+  /**
+   * This function is called if a user attempts to access rows that are
+   * no longer in the row buffer and need to be fetched from the backend.
+   * A user can select some or all fields in a row, and only those fields
+   * will be returned.
+   */
+  async fetchRowsByIndex(
+    { getters, rootGetters },
+    { startIndex, limit, fields, excludeFields }
+  ) {
+    if (fields !== undefined) {
+      fields = fields.map((field) => `field_${field.id}`)
+    }
+    if (excludeFields !== undefined) {
+      excludeFields = excludeFields.map((field) => `field_${field.id}`)
+    }
+
+    const gridId = getters.getLastGridId
+    const view = rootGetters['view/get'](getters.getLastGridId)
+    const { data } = await GridService(this.$client).fetchRows({
+      gridId,
+      offset: startIndex,
+      limit,
+      search: getters.getServerSearchTerm,
+      searchMode: getDefaultSearchModeFromEnv(this.$config),
+      publicUrl: rootGetters['page/view/public/getIsPublic'],
+      publicAuthToken: rootGetters['page/view/public/getAuthToken'],
+      groupBy: getGroupBy(rootGetters, getters.getLastGridId),
+      orderBy: getOrderBy(view, getters.getAdhocSorting),
+      filters: getFilters(view, getters.getAdhocFiltering),
+      includeFields: fields,
+      excludeFields,
+    })
+    return data.results
   },
   setRowHover({ commit }, { row, value }) {
     commit('SET_ROW_HOVER', { row, value })
@@ -825,10 +1739,28 @@ export const actions = {
    */
   removeRowSelectedBy(
     { dispatch, commit },
-    { grid, row, field, fields, primary, getScrollTop }
+    { grid, row, field, fields, getScrollTop, isRowOpenedInModal = undefined }
   ) {
     commit('REMOVE_ROW_SELECTED_BY', { row, fieldId: field.id })
-    dispatch('refreshRow', { grid, row, fields, primary, getScrollTop })
+    dispatch('refreshRow', {
+      grid,
+      row,
+      fields,
+      getScrollTop,
+      isRowOpenedInModal,
+    })
+  },
+  /**
+   * Used when row data needs to be directly re-fetched from the Backend and
+   * the other (background) row needs to be refreshed. For example, when editing
+   * row from a *different* table using ForeignRowEditModal or just RowEditModal
+   * component in general.
+   */
+  async refreshRowFromBackend({ commit, getters, dispatch }, { table, row }) {
+    const { data } = await RowService(this.$client).get(table.id, row.id)
+    // Use the return value to update the desired row with latest values from the
+    // backend.
+    commit('UPDATE_ROW_IN_BUFFER', { row, values: data })
   },
   /**
    * Called when the user wants to create a new row. Optionally a `before` row
@@ -837,86 +1769,294 @@ export const actions = {
    */
   async createNewRow(
     { commit, getters, dispatch },
-    { view, table, fields, primary, values = {}, before = null }
+    {
+      view,
+      table,
+      fields,
+      values = {},
+      before = null,
+      selectPrimaryCell = false,
+      isRowOpenedInModal = undefined,
+    }
   ) {
-    // Fill the not provided values with the empty value of the field type so we can
-    // immediately commit the created row to the state.
-    const allFields = [primary].concat(fields)
-    allFields.forEach((field) => {
-      const name = `field_${field.id}`
-      if (!(name in values)) {
-        const fieldType = this.$registry.get('field', field._.type.type)
-        const empty = fieldType.getEmptyValue(field)
-        values[name] = empty
-      }
+    await dispatch('createNewRows', {
+      view,
+      table,
+      fields,
+      rows: [values],
+      before,
+      selectPrimaryCell,
+      isRowOpenedInModal,
     })
+  },
+  async createNewRows(
+    { commit, getters, dispatch, state },
+    {
+      view,
+      table,
+      fields,
+      rows = {},
+      before = null,
+      selectPrimaryCell = false,
+      isRowOpenedInModal = undefined,
+    }
+  ) {
+    // Create an object of default field values that can be used to fill the row with
+    // missing default values
+    const fieldNewRowValueMap = fields.reduce((map, field) => {
+      const name = `field_${field.id}`
+      const fieldType = this.$registry.get('field', field._.type.type)
+      map[name] = fieldType.getNewRowValue(field)
+      return map
+    }, {})
+
+    const step = before ? ORDER_STEP_BEFORE : ORDER_STEP
 
     // If before is not provided, then the row is added last. Because we don't know
     // the total amount of rows in the table, we are going to add find the highest
     // existing order in the buffer and increase that by one.
     let order = getters.getHighestOrder
       .integerValue(BigNumber.ROUND_CEIL)
-      .plus('1')
+      .plus(step)
       .toString()
-    let index = getters.getBufferEndIndex
     if (before !== null) {
-      // If the row has been placed before another row we can specifically insert to
-      // the row at a calculated index.
-      const change = new BigNumber('0.00000000000000000001')
-      order = new BigNumber(before.order).minus(change).toString()
-      index = getters.getAllRows.findIndex((r) => r.id === before.id)
+      // It's okay to temporary set an order that just subtracts the
+      // ORDER_STEP_BEFORE because there will never be a conflict with rows because
+      // of the fraction ordering.
+      order = new BigNumber(before.order)
+        .minus(new BigNumber(step * rows.length))
+        .toString()
     }
 
-    // Populate the row and set the loading state to indicate that the row has not
-    // yet been added.
-    const row = Object.assign({}, values)
-    populateRow(row)
-    row.id = uuid()
-    row.order = order
-    row._.loading = true
+    const index =
+      before === null
+        ? getters.getBufferEndIndex
+        : getters.getAllRows.findIndex((r) => r.id === before.id)
 
-    commit('INSERT_NEW_ROW_IN_BUFFER_AT_INDEX', { row, index })
+    const rowsPopulated = rows.map((row) => {
+      row = { ...clone(fieldNewRowValueMap), ...row }
+      row = populateRow(row)
+      row.id = uuid()
+      row.order = order
+      row._.loading = true
+
+      order = new BigNumber(order).plus(new BigNumber(step)).toString()
+
+      return row
+    })
+
+    const isSingleRowInsertion = rowsPopulated.length === 1
+    const oldCount = getters.getCount
+    const canUpdateOptimistically = canRowsBeOptimisticallyUpdatedInView(
+      this.$registry,
+      view,
+      fields,
+      getters.getActiveSearchTerm
+    )
+    if (canUpdateOptimistically) {
+      // When a single row is inserted we don't want to deal with filters, sorts and
+      // search just yet. Therefore it is okay to just insert the row into the buffer.
+      if (isSingleRowInsertion) {
+        commit('UPDATE_GROUP_BY_METADATA_COUNT', {
+          fields,
+          registry: this.$registry,
+          row: rowsPopulated[0],
+          increase: true,
+          decrease: false,
+        })
+        commit('INSERT_NEW_ROWS_IN_BUFFER_AT_INDEX', {
+          rows: rowsPopulated,
+          index,
+        })
+      } else {
+        // When inserting multiple rows we will need to deal with filters, sorts or search
+        // not matching. `createdNewRow` deals with exactly that for us.
+        for (const rowPopulated of rowsPopulated) {
+          await dispatch('createdNewRow', {
+            view,
+            fields,
+            values: rowPopulated,
+            metadata: {},
+            populate: false,
+          })
+        }
+      }
+    } else {
+      // just insert rows in the buffer and delay dealing with filters, sorts or search
+      // until we get the response from the backend.
+      commit('INSERT_NEW_ROWS_IN_BUFFER_AT_INDEX', {
+        rows: rowsPopulated,
+        index,
+      })
+    }
+
     dispatch('visibleByScrollTop')
 
+    // Check if not all rows are visible.
+    const diff = oldCount - getters.getCount + rowsPopulated.length
+    if (!isSingleRowInsertion && diff > 0) {
+      dispatch(
+        'toast/success',
+        {
+          title: this.$i18n.t('gridView.hiddenRowsInsertedTitle'),
+          message: this.$i18n.t('gridView.hiddenRowsInsertedMessage', {
+            number: diff,
+          }),
+        },
+        { root: true }
+      )
+    }
+
+    const primaryField = fields.find((f) => f.primary)
+    if (selectPrimaryCell && primaryField && isSingleRowInsertion) {
+      await dispatch('setSelectedCell', {
+        rowId: rowsPopulated[0].id,
+        fieldId: primaryField.id,
+        fields,
+      })
+    }
+
+    // The backend expects slightly different values than what we have in the row
+    // buffer. Therefore, we need to prepare the rows before we can send them to the
+    // backend.
+    const rowsPrepared = rows.map((row) => {
+      row = { ...clone(fieldNewRowValueMap), ...row }
+      row = prepareRowForRequest(row, fields, this.$registry)
+      return row
+    })
+
+    // Lock the newly created rows with their persistent ID, so that if the user
+    // changes the value before the row is created, that request is queued.
+    rowsPopulated.forEach((row) => {
+      createAndUpdateRowQueue.lock(row._.persistentId)
+    })
+
     try {
-      const { data } = await RowService(this.$client).create(
+      const { data } = await RowService(this.$client).batchCreate(
         table.id,
-        values,
+        rowsPrepared,
         before !== null ? before.id : null
       )
-      commit('FINALIZE_ROW_IN_BUFFER', {
-        oldId: row.id,
-        id: data.id,
-        order: data.order,
+
+      const fieldsToFinalize = fields
+        .filter(
+          (field) =>
+            field.read_only ||
+            this.$registry.get('field', field._.type.type).isReadOnly
+        )
+        .map((field) => `field_${field.id}`)
+      commit('FINALIZE_ROWS_IN_BUFFER', {
+        oldRows: rowsPopulated,
+        newRows: data.items,
+        fields: fieldsToFinalize,
       })
-      dispatch('onRowChange', { view, row, fields, primary })
+
+      for (let i = 0; i < data.items.length; i += 1) {
+        const item = data.items[i]
+        // Use the updated row in the buffer if it exists, otherwise use the populated
+        // row object to update inner state.
+        const row = state.rows.find((r) => r.id === item.id) || rowsPopulated[i]
+        if (!canUpdateOptimistically) {
+          commit('UPDATE_GROUP_BY_METADATA_COUNT', {
+            fields,
+            registry: this.$registry,
+            row,
+            increase: true,
+            decrease: false,
+          })
+        }
+        dispatch('onRowChange', { view, row, fields })
+        const rowId = row.id
+        setTimeout(() => {
+          // Get the latest row so that any changes that might have been made in the
+          // meantime are included. This is needed to pass the correct row into the
+          // `refreshRow` that shows/hide the row.
+          const row = getters.getRow(rowId)
+          if (row && !row._.selected) {
+            dispatch('refreshRow', {
+              grid: view,
+              row,
+              fields,
+              isRowOpenedInModal,
+            })
+          }
+        }, REFRESH_ROW_DELAY)
+      }
+
+      await dispatch('fetchAllFieldAggregationData', {
+        view,
+      })
     } catch (error) {
-      commit('DELETE_ROW_IN_BUFFER', row)
+      if (isSingleRowInsertion) {
+        commit('UPDATE_GROUP_BY_METADATA_COUNT', {
+          fields,
+          registry: this.$registry,
+          row: rowsPopulated[0],
+          increase: false,
+          decrease: true,
+        })
+        commit('DELETE_ROW_IN_BUFFER', rowsPopulated[0])
+      } else {
+        // When we have multiple rows we will need to re-evaluate where the rest of the
+        // rows are now positioned. Therefore, we need to call `deletedExistingRow` to
+        // deal with all the potential edge cases
+        for (const rowPopulated of rowsPopulated) {
+          await dispatch('deletedExistingRow', {
+            view,
+            fields,
+            row: rowPopulated,
+          })
+        }
+      }
       throw error
+    } finally {
+      // Release the lock because now the update requests can come through if they
+      // were made. Even if the rows were not created, we have to release the ids to
+      // clear the memory.
+      rowsPopulated.forEach((row) => {
+        createAndUpdateRowQueue.release(row._.persistentId)
+      })
     }
+
+    dispatch('fetchByScrollTopDelayed', {
+      scrollTop: getters.getScrollTop,
+      fields,
+    })
   },
   /**
-   * Called after a new row has been created, which could be by by the user or via
+   * Called after a new row has been created, which could be by the user or via
    * another channel. It will only add the row if it belongs inside the views and it
    * also makes sure that row will be inserted at the correct position.
    */
-  createdNewRow(
+  async createdNewRow(
     { commit, getters, dispatch },
-    { view, fields, primary, values }
+    { view, fields, values, metadata, populate = true }
   ) {
     const row = clone(values)
-    populateRow(row)
+
+    if (populate) {
+      populateRow(row, metadata)
+    }
 
     // Check if the row belongs into the current view by checking if it matches the
     // filters and search.
-    dispatch('updateMatchFilters', { view, row, fields, primary })
-    dispatch('updateSearchMatchesForRow', { row, fields, primary })
+    await dispatch('updateMatchFilters', { view, row, fields })
+    await dispatch('updateSearchMatchesForRow', { row, fields })
 
     // If the row does not match the filters or the search then we don't have to add
     // it at all.
     if (!row._.matchFilters || !row._.matchSearch) {
       return
     }
+
+    // Update the group by metadata if needed.
+    commit('UPDATE_GROUP_BY_METADATA_COUNT', {
+      fields,
+      registry: this.$registry,
+      row,
+      increase: true,
+      decrease: false,
+    })
 
     // Now that we know that the row applies to the filters, which means it belongs
     // in this view, we need to estimate what position it has in the table.
@@ -926,7 +2066,7 @@ export const actions = {
       this.$registry,
       view.sortings,
       fields,
-      primary
+      view.group_bys
     )
     allRowsCopy.sort(sortFunction)
     const index = allRowsCopy.findIndex((r) => r.id === row.id)
@@ -935,13 +2075,13 @@ export const actions = {
     const isLast = index === allRowsCopy.length - 1
 
     if (
-      // All of these scenario's mean that that the row belongs in the buffer that
+      // All of these scenario's mean that the row belongs in the buffer that
       // we have loaded currently.
       (isFirst && getters.getBufferStartIndex === 0) ||
       (isLast && getters.getBufferEndIndex === getters.getCount) ||
       (index > 0 && index < allRowsCopy.length - 1)
     ) {
-      commit('INSERT_NEW_ROW_IN_BUFFER_AT_INDEX', { row, index })
+      commit('INSERT_NEW_ROWS_IN_BUFFER_AT_INDEX', { rows: [row], index })
     } else {
       if (isFirst) {
         // Because the row has been added before the our buffer, we need know that the
@@ -960,7 +2100,7 @@ export const actions = {
    */
   async moveRow(
     { commit, dispatch, getters },
-    { table, grid, fields, primary, getScrollTop, row, before = null }
+    { table, grid, fields, getScrollTop, row, before = null }
   ) {
     const oldOrder = row.order
 
@@ -974,16 +2114,41 @@ export const actions = {
     if (before !== null) {
       // If the row has been placed before another row we can specifically insert to
       // the row at a calculated index.
-      const change = new BigNumber('0.00000000000000000001')
+      const change = new BigNumber(ORDER_STEP_BEFORE)
+      // It's okay to temporary set an order that just subtracts the
+      // ORDER_STEP_BEFORE because there will never be a conflict with rows because
+      // of the fraction ordering.
       order = new BigNumber(before.order).minus(change).toString()
     }
+
+    // In order to make changes feel really fast, we optimistically
+    // updated all the field values that provide a onRowMove function
+    const fieldsToCallOnRowMove = fields
+    const optimisticFieldValues = {}
+    const valuesBeforeOptimisticUpdate = {}
+
+    fieldsToCallOnRowMove.forEach((field) => {
+      const fieldType = this.$registry.get('field', field._.type.type)
+      const fieldID = `field_${field.id}`
+      const currentFieldValue = row[fieldID]
+      const fieldValue = fieldType.onRowMove(
+        row,
+        order,
+        oldOrder,
+        field,
+        currentFieldValue
+      )
+      if (currentFieldValue !== fieldValue) {
+        optimisticFieldValues[fieldID] = fieldValue
+        valuesBeforeOptimisticUpdate[fieldID] = currentFieldValue
+      }
+    })
 
     dispatch('updatedExistingRow', {
       view: grid,
       fields,
-      primary,
       row,
-      values: { order },
+      values: { order, ...optimisticFieldValues },
     })
 
     try {
@@ -992,6 +2157,9 @@ export const actions = {
         row.id,
         before !== null ? before.id : null
       )
+      // Use the return value to update the moved row with values from
+      // the backend
+      commit('UPDATE_ROW_IN_BUFFER', { row, values: data })
       if (before === null) {
         // Not having a before means that the row was moved to the end and because
         // that order was just an estimation, we want to update it with the real
@@ -1001,72 +2169,481 @@ export const actions = {
       dispatch('fetchByScrollTopDelayed', {
         scrollTop: getScrollTop(),
         fields,
-        primary,
       })
+      dispatch('fetchAllFieldAggregationData', { view: grid })
     } catch (error) {
       dispatch('updatedExistingRow', {
         view: grid,
         fields,
-        primary,
         row,
-        values: { order: oldOrder },
+        values: { order: oldOrder, ...valuesBeforeOptimisticUpdate },
       })
       throw error
     }
   },
   /**
    * Updates a grid view field value. It will immediately be updated in the store
-   * and only if the change request fails it will reverted to give a faster
+   * and only if the change request fails it will revert to give a faster
    * experience for the user.
    */
   async updateRowValue(
-    { commit, dispatch },
-    { table, view, row, field, fields, primary, value, oldValue }
+    { commit, dispatch, getters },
+    {
+      table,
+      view,
+      row,
+      field,
+      fields,
+      value,
+      oldValue,
+      isRowOpenedInModal = undefined,
+    }
   ) {
-    commit('UPDATE_ROW_FIELD_VALUE', { row, field, value })
-    dispatch('onRowChange', { view, row, fields, primary })
+    /**
+     * This helper function will make sure that the values of the related row are
+     * updated the right way.
+     */
+    const updateValues = async (values, optimisticUpdate) => {
+      const rowExistsInBuffer = getters.getRow(row.id) !== undefined
 
-    const fieldType = this.$registry.get('field', field._.type.type)
-    const newValue = fieldType.prepareValueForUpdate(field, value)
-    const values = {}
-    values[`field_${field.id}`] = newValue
+      if (rowExistsInBuffer) {
+        // If the row exists in the buffer, we can visually show to the user that
+        // the values have changed, without immediately reflecting the change in
+        // the buffer.
+        if (optimisticUpdate) {
+          commit('UPDATE_GROUP_BY_METADATA_COUNT', {
+            fields,
+            registry: this.$registry,
+            row,
+            increase: false,
+            decrease: true,
+          })
+        }
+        commit('UPDATE_ROW_VALUES', {
+          row,
+          values: { ...values },
+        })
+        if (optimisticUpdate) {
+          commit('UPDATE_GROUP_BY_METADATA_COUNT', {
+            fields,
+            registry: this.$registry,
+            row,
+            increase: true,
+            decrease: false,
+          })
+          await dispatch('onRowChange', { view, row, fields })
+        }
+      } else {
+        // If the row doesn't exist in the buffer, it could be that the new values
+        // bring in into there. Dispatching the `updatedExistingRow` will make
+        // sure that will happen in the right way.
+        await dispatch('updatedExistingRow', { view, fields, row, values })
+        // There is a chance that the row is not in the buffer, but it does exist in
+        // the view. In that case, the `updatedExistingRow` action has not done
+        // anything. There is a possibility that the row is visible in the row edit
+        // modal, but then it won't be updated, so we have to update it forcefully.
+        commit('UPDATE_ROW_VALUES', {
+          row,
+          values: { ...values },
+        })
+        await dispatch('fetchByScrollTopDelayed', {
+          scrollTop: getters.getScrollTop,
+          fields,
+        })
+      }
+    }
+
+    const { newRowValues, oldRowValues, updateRequestValues } =
+      prepareNewOldAndUpdateRequestValues(
+        row,
+        fields,
+        field,
+        value,
+        oldValue,
+        this.$registry
+      )
+
+    const canUpdateOptimistically = canRowsBeOptimisticallyUpdatedInView(
+      this.$registry,
+      view,
+      fields,
+      getters.getActiveSearchTerm
+    )
+    if (!canUpdateOptimistically) {
+      commit('SET_ROW_LOADING', { row, value: true })
+    }
+
+    // When possible update the values before making a request to the backend to make
+    // it feel instant for the user. If we can't safely do it in the frontend, then
+    // we have to show a loading state and update the row after the request has been
+    // made.
+    await updateValues(newRowValues, canUpdateOptimistically)
 
     try {
-      await RowService(this.$client).update(table.id, row.id, values)
+      // Add the update actual update function to the queue so that the same row
+      // will never be updated concurrency, and so that the value won't be
+      // updated if the row hasn't been created yet.
+      await createAndUpdateRowQueue.add(async () => {
+        const updatedRow = await RowService(this.$client).update(
+          table.id,
+          row.id,
+          updateRequestValues
+        )
+        // Extract only the read-only values because we don't want to update the other
+        // values that might have been updated in the meantime.
+        const readOnlyData = extractRowReadOnlyValues(
+          updatedRow.data,
+          fields,
+          this.$registry
+        )
+        // Update the remaining values like formula, which depend on the backend.
+        await updateValues(readOnlyData, true)
+        // If we can't optimistically update the row, refresh it to stop the loading
+        // state, show proper messages, and update its position and state.
+        if (!canUpdateOptimistically) {
+          const rowId = row.id
+          commit('SET_ROW_LOADING', { row, value: false })
+          setTimeout(() => {
+            // Get the latest row so that updated `readOnlyData` values are included,
+            // and any other changes that might have been made in the meantime. This is
+            // needed to pass the correct row into the `refreshRow` that shows/hide the
+            // row.
+            const row = getters.getRow(rowId)
+            if (row && !row._.selected) {
+              dispatch('refreshRow', {
+                grid: view,
+                row,
+                fields,
+                isRowOpenedInModal,
+              })
+            }
+          }, REFRESH_ROW_DELAY)
+        }
+        dispatch('fetchAllFieldAggregationData', {
+          view,
+        })
+      }, row._.persistentId)
     } catch (error) {
-      commit('UPDATE_ROW_FIELD_VALUE', { row, field, value: oldValue })
-      dispatch('onRowChange', { view, row, fields, primary })
+      if (!canUpdateOptimistically) {
+        commit('SET_ROW_LOADING', { row, value: false })
+      }
+      await updateValues(oldRowValues, true)
       throw error
     }
+  },
+  /**
+   * Set the multiple select indexes using the row and field head and tail indexes.
+   */
+  setMultipleSelect(
+    { commit, dispatch },
+    { rowHeadIndex, fieldHeadIndex, rowTailIndex, fieldTailIndex }
+  ) {
+    dispatch('updateMultipleSelectIndexes', {
+      position: 'head',
+      rowIndex: rowHeadIndex,
+      fieldIndex: fieldHeadIndex,
+    })
+    dispatch('updateMultipleSelectIndexes', {
+      position: 'tail',
+      rowIndex: rowTailIndex,
+      fieldIndex: fieldTailIndex,
+    })
+    commit('SET_MULTISELECT_ACTIVE', true)
+    commit('SET_SELECTED_CELL', { rowId: -1, fieldId: -1 })
+  },
+  /**
+   * Action to update head or tail (position) indexes for row and field
+   * multiple select operations.
+   *
+   * It will prevent updating selection to nonsense indexes by doing nothing
+   * if a provided index isn't correct.
+   */
+  updateMultipleSelectIndexes(
+    { commit, getters },
+    { position, rowIndex, fieldIndex }
+  ) {
+    if (
+      (position === 'tail' && getters.getMultiSelectHeadRowIndex !== -1) ||
+      (position === 'head' && getters.getMultiSelectTailRowIndex !== -1)
+    ) {
+      // check if the selection would go over limit
+      const limit = this.$config.BASEROW_ROW_PAGE_SIZE_LIMIT
+      const previousIndex =
+        position === 'head'
+          ? getters.getMultiSelectTailRowIndex
+          : getters.getMultiSelectHeadRowIndex
+      if (Math.abs(previousIndex - rowIndex) > limit - 1) {
+        return
+      }
+    }
+
+    if (rowIndex < 0 || fieldIndex < 0) {
+      return
+    }
+
+    if (
+      rowIndex > getters.getRowsLength + getters.getBufferStartIndex - 1 ||
+      fieldIndex > getters.getNumberOfVisibleFields - 1
+    ) {
+      return
+    }
+
+    commit('UPDATE_MULTISELECT', {
+      position,
+      rowIndex,
+      fieldIndex,
+    })
+  },
+  /**
+   * This action is used by the grid view to change multiple cells when pasting
+   * multiple values. It figures out which cells need to be changed, makes a request
+   * to the backend and updates the affected rows in the store.
+   */
+  async updateDataIntoCells(
+    { getters, commit, dispatch },
+    {
+      table,
+      view,
+      allVisibleFields,
+      allFieldsInTable,
+      getScrollTop,
+      textData,
+      jsonData,
+      rowIndex,
+      fieldIndex,
+      selectUpdatedCells = true,
+    }
+  ) {
+    const copiedRowsCount = textData.length
+    const copiedCellsInRowsCount = textData[0].length
+    const isSingleCellCopied =
+      copiedRowsCount === 1 && copiedCellsInRowsCount === 1
+
+    if (isSingleCellCopied) {
+      // the textData and jsonData are recreated
+      // to fill the entire multi selection
+      const selectedRowsCount =
+        getters.getMultiSelectTailRowIndex -
+        getters.getMultiSelectHeadRowIndex +
+        1
+      const selectedFieldsCount =
+        getters.getMultiSelectTailFieldIndex -
+        getters.getMultiSelectHeadFieldIndex +
+        1
+      const rowTextArray = Array(selectedFieldsCount).fill(textData[0][0])
+      textData = Array(selectedRowsCount).fill(rowTextArray)
+
+      if (jsonData) {
+        const rowJsonArray = Array(selectedFieldsCount).fill(jsonData[0][0])
+        jsonData = Array(selectedRowsCount).fill(rowJsonArray)
+      }
+    }
+
+    // If the origin row and field index are not provided, we need to use the
+    // head indexes of the multiple select.
+    const rowHeadIndex = rowIndex ?? getters.getMultiSelectHeadRowIndex
+    const fieldHeadIndex = fieldIndex ?? getters.getMultiSelectHeadFieldIndex
+
+    // Based on the data, we can figure out in which cells we must paste. Here we find
+    // the maximum tail indexes.
+    let rowTailIndex =
+      Math.min(getters.getCount, rowHeadIndex + copiedRowsCount) - 1
+    let fieldTailIndex =
+      Math.min(
+        allVisibleFields.length,
+        fieldHeadIndex + copiedCellsInRowsCount
+      ) - 1
+
+    if (isSingleCellCopied) {
+      // we want the tail indexes to follow the multi select exactly
+      rowTailIndex = getters.getMultiSelectTailRowIndex
+      fieldTailIndex = getters.getMultiSelectTailFieldIndex
+    }
+
+    const newRowsCount = copiedRowsCount - (rowTailIndex - rowHeadIndex + 1)
+
+    // Create extra missing rows
+    if (newRowsCount > 0) {
+      await dispatch('createNewRows', {
+        view,
+        table,
+        fields: allFieldsInTable,
+        rows: Array.from(Array(newRowsCount), (element, index) => {
+          return {}
+        }),
+        selectPrimaryCell: false,
+      })
+      rowTailIndex = rowTailIndex + newRowsCount
+    }
+
+    if (!isSingleCellCopied && selectUpdatedCells) {
+      // Expand the selection of the multiple select to the cells that we're going to
+      // paste in, so the user can see which values have been updated. This is because
+      // it could be that there are more or less values in the clipboard compared to
+      // what was originally selected.
+
+      await dispatch('setMultipleSelect', {
+        rowHeadIndex,
+        fieldHeadIndex,
+        rowTailIndex,
+        fieldTailIndex,
+      })
+    }
+
+    // Figure out which rows are already in the buffered and temporarily store them
+    // in an array.
+    const fieldsInOrder = allVisibleFields.slice(
+      fieldHeadIndex,
+      fieldTailIndex + 1
+    )
+    let rowsInOrder = getters.getAllRows.slice(
+      rowHeadIndex - getters.getBufferStartIndex,
+      rowTailIndex + 1 - getters.getBufferStartIndex
+    )
+
+    // Check if there are fields that can be updated. If there aren't any fields,
+    // maybe because the provided index is outside of the available fields or
+    // because there are only read only fields, we don't want to do anything.
+    const writeFields = fieldsInOrder.filter(
+      (field) => !field._.type.isReadOnly
+    )
+    if (writeFields.length === 0) {
+      return
+    }
+
+    // Calculate if there are rows outside of the buffer that need to be fetched and
+    // prepended or appended to the `rowsInOrder`
+    let startIndex = rowHeadIndex
+    if (rowHeadIndex + rowsInOrder.length >= getters.getBufferStartIndex) {
+      startIndex += rowsInOrder.length
+    }
+    const limit = rowTailIndex - rowHeadIndex - rowsInOrder.length + 1
+    if (limit > 0) {
+      const rowsNotInBuffer = await dispatch('fetchRowsByIndex', {
+        startIndex,
+        limit,
+      })
+      // Depends on whether the missing rows are before or after the buffer.
+      rowsInOrder =
+        startIndex < getters.getBufferStartIndex
+          ? [...rowsNotInBuffer, ...rowsInOrder]
+          : [...rowsInOrder, ...rowsNotInBuffer]
+    }
+
+    // Create a copy of the existing (old) rows, which are needed to create the
+    // comparison when checking if the rows still matches the filters and position.
+    const oldRowsInOrder = clone(rowsInOrder)
+    // Prepare the values that must be send to the server.
+    const valuesForUpdate = []
+    // Prepare the values for update and update the row objects.
+
+    rowsInOrder.forEach((row, rowIndex) => {
+      valuesForUpdate[rowIndex] = { id: row.id }
+
+      fieldsInOrder.forEach((field, fieldIndex) => {
+        // We can't pre-filter because we need the correct filter index.
+        if (field._.type.isReadOnly) {
+          return
+        }
+
+        const fieldId = `field_${field.id}`
+        const textValue = textData[rowIndex][fieldIndex]
+        const jsonValue =
+          jsonData != null ? jsonData[rowIndex][fieldIndex] : undefined
+        const fieldType = this.$registry.get('field', field.type)
+        const preparedValue = fieldType.prepareValueForPaste(
+          field,
+          textValue,
+          jsonValue
+        )
+        const newValue = fieldType.prepareValueForUpdate(field, preparedValue)
+        valuesForUpdate[rowIndex][fieldId] = newValue
+      })
+    })
+
+    // We don't have to update the rows in the buffer before the request is being made
+    // because we're showing a loading animation to the user indicating that the
+    // rows are being updated.
+    const { data: responseData } = await RowService(this.$client).batchUpdate(
+      table.id,
+      valuesForUpdate
+    )
+    const updatedRows = responseData.items
+
+    // Loop over the old rows, find the matching updated row and update them in the
+    // buffer accordingly.
+    for (const row of oldRowsInOrder) {
+      // The values are the updated row returned by the response.
+      const values = updatedRows.find((updatedRow) => updatedRow.id === row.id)
+      // Calling the updatedExistingRow will automatically remove the row from the
+      // view if it doesn't matter the filters anymore and it will also be moved to
+      // the right position if changed.
+      await dispatch('updatedExistingRow', {
+        view,
+        fields: allFieldsInTable,
+        row,
+        values,
+      })
+    }
+
+    // Must be called because rows could have been removed or moved to a different
+    // position and we might need to fetch missing rows.
+    await dispatch('fetchByScrollTopDelayed', {
+      scrollTop: getScrollTop(),
+      fields: allFieldsInTable,
+    })
+    dispatch('fetchAllFieldAggregationData', { view })
   },
   /**
    * Called after an existing row has been updated, which could be by the user or
    * via another channel. It will make sure that the row has the correct position or
    * that is will be deleted or created depending if was already in the view.
    */
-  updatedExistingRow(
+  async updatedExistingRow(
     { commit, getters, dispatch },
-    { view, fields, primary, row, values }
+    { view, fields, row, values, metadata, updatedFieldIds = [] }
   ) {
     const oldRow = clone(row)
     const newRow = Object.assign(clone(row), values)
-    populateRow(oldRow)
-    populateRow(newRow)
+    populateRow(oldRow, metadata)
+    populateRow(newRow, metadata)
 
-    dispatch('updateMatchFilters', { view, row: oldRow, fields, primary })
-    dispatch('updateSearchMatchesForRow', { row: oldRow, fields, primary })
+    await dispatch('updateMatchFilters', { view, row: oldRow, fields })
+    await dispatch('updateSearchMatchesForRow', { row: oldRow, fields })
 
-    dispatch('updateMatchFilters', { view, row: newRow, fields, primary })
-    dispatch('updateSearchMatchesForRow', { row: newRow, fields, primary })
+    await dispatch('updateMatchFilters', { view, row: newRow, fields })
+    await dispatch('updateSearchMatchesForRow', { row: newRow, fields })
 
     const oldRowExists = oldRow._.matchFilters && oldRow._.matchSearch
     const newRowExists = newRow._.matchFilters && newRow._.matchSearch
 
     if (oldRowExists && !newRowExists) {
-      dispatch('deletedExistingRow', { view, fields, primary, row })
+      await dispatch('deletedExistingRow', { view, fields, row })
     } else if (!oldRowExists && newRowExists) {
-      dispatch('createdNewRow', { view, fields, primary, values: newRow })
+      await dispatch('createdNewRow', {
+        view,
+        fields,
+        values: newRow,
+        metadata,
+      })
     } else if (oldRowExists && newRowExists) {
+      // Instead of implementing a metadata updated mutation, we can easily just
+      // call the deleted and created mutation because that will have the same effect.
+      commit('UPDATE_GROUP_BY_METADATA_COUNT', {
+        fields,
+        registry: this.$registry,
+        row: oldRow,
+        increase: false,
+        decrease: true,
+      })
+      commit('UPDATE_GROUP_BY_METADATA_COUNT', {
+        fields,
+        registry: this.$registry,
+        row: newRow,
+        increase: true,
+        decrease: false,
+      })
+
       // If the new order already exists in the buffer and is not the row that has
       // been updated, we need to decrease all the other orders, otherwise we could
       // have duplicate orders.
@@ -1083,7 +2660,7 @@ export const actions = {
         this.$registry,
         view.sortings,
         fields,
-        primary
+        view.group_bys
       )
       const allRows = getters.getAllRows
       const index = allRows.findIndex((r) => r.id === row.id)
@@ -1096,7 +2673,7 @@ export const actions = {
 
       if (oldRowInBuffer) {
         // If the old row is inside the buffer at a known position.
-        commit('UPDATE_ROW_IN_BUFFER', { row, values })
+        commit('UPDATE_ROW_IN_BUFFER', { row, values, metadata })
         commit('SET_BUFFER_LIMIT', getters.getBufferLimit - 1)
       } else if (oldIsFirst) {
         // If the old row exists in the buffer, but is at the before position.
@@ -1160,12 +2737,35 @@ export const actions = {
         commit('SET_BUFFER_START_INDEX', getters.getBufferStartIndex + 1)
       }
 
+      // Remove every pending AI field if a value is provided for it. This will make
+      // sure the loading state will stop if the value is updated. This is done even
+      // if the row is not found in the buffer because it could have been removed from
+      // the buffer when scrolling outside the buffer range.
+      const getFieldId = (key) => parseInt(key.split('_')[1])
+      const fieldIdsToClearPendingOperationsFor = Object.entries(values)
+        .filter(
+          ([key, value]) =>
+            key.startsWith('field_') &&
+            // Either the value has changed.
+            (_.isEqual(value, oldRow[key]) ||
+              // Or the backend has just recalculated the value, even if it hasn't
+              // actually changed.
+              updatedFieldIds.includes(getFieldId(key)))
+        )
+        .map(([key, value]) => getFieldId(key))
+
+      commit('CLEAR_PENDING_FIELD_OPERATIONS', {
+        fieldIds: fieldIdsToClearPendingOperationsFor,
+        rowId: row.id,
+      })
+
       // If the row as in the old buffer, but ended up at the first/before or
       // last/after position. This means that we can't know for sure the row should
       // be in the buffer, so it is removed from it.
       if (oldRowInBuffer && !newRowInBuffer && (newIsFirst || newIsLast)) {
         commit('DELETE_ROW_IN_BUFFER_WITHOUT_UPDATE', row)
       }
+      await dispatch('correctMultiSelect')
     }
   },
   /**
@@ -1173,7 +2773,7 @@ export const actions = {
    */
   async deleteExistingRow(
     { commit, dispatch, getters },
-    { table, view, row, fields, primary, getScrollTop }
+    { table, view, row, fields, getScrollTop }
   ) {
     commit('SET_ROW_LOADING', { row, value: true })
 
@@ -1182,40 +2782,90 @@ export const actions = {
       await dispatch('deletedExistingRow', {
         view,
         fields,
-        primary,
         row,
         getScrollTop,
       })
       await dispatch('fetchByScrollTopDelayed', {
         scrollTop: getScrollTop(),
         fields,
-        primary,
       })
+      dispatch('fetchAllFieldAggregationData', { view })
     } catch (error) {
       commit('SET_ROW_LOADING', { row, value: false })
       throw error
     }
   },
   /**
+   * Attempt to delete all multi-selected rows.
+   */
+  async deleteSelectedRows(
+    { dispatch, getters },
+    { table, view, fields, getScrollTop }
+  ) {
+    if (!getters.isMultiSelectActive) {
+      return
+    }
+    let rows = []
+    if (getters.areMultiSelectRowsWithinBuffer) {
+      rows = getters.getSelectedRows
+    } else {
+      // Rows not in buffer, fetch from backend
+      const [minRowIndex, maxRowIndex] = getters.getMultiSelectRowIndexSorted
+      const limit = maxRowIndex - minRowIndex + 1
+
+      rows = await dispatch('fetchRowsByIndex', {
+        startIndex: minRowIndex,
+        limit,
+        includeFields: fields,
+      })
+    }
+    const rowIdsToDelete = rows.map((r) => r.id)
+    await RowService(this.$client).batchDelete(table.id, rowIdsToDelete)
+
+    for (const row of rows) {
+      await dispatch('deletedExistingRow', {
+        view,
+        fields,
+        row,
+        getScrollTop,
+      })
+    }
+    dispatch('clearAndDisableMultiSelect', { view })
+    await dispatch('fetchByScrollTopDelayed', {
+      scrollTop: getScrollTop(),
+      fields,
+    })
+    dispatch('fetchAllFieldAggregationData', { view })
+  },
+  /**
    * Called after an existing row has been deleted, which could be by the user or
    * via another channel.
    */
-  deletedExistingRow(
+  async deletedExistingRow(
     { commit, getters, dispatch },
-    { view, fields, primary, row }
+    { view, fields, row }
   ) {
     row = clone(row)
     populateRow(row)
 
     // Check if that row was visible in the view.
-    dispatch('updateMatchFilters', { view, row, fields, primary })
-    dispatch('updateSearchMatchesForRow', { row, fields, primary })
+    await dispatch('updateMatchFilters', { view, row, fields })
+    await dispatch('updateSearchMatchesForRow', { row, fields })
 
     // If the row does not match the filters or the search then did not exist in the
     // view, so we don't have to do anything.
     if (!row._.matchFilters || !row._.matchSearch) {
       return
     }
+
+    // Decrease the count in the group by metadata if an entry exists.
+    commit('UPDATE_GROUP_BY_METADATA_COUNT', {
+      fields,
+      registry: this.$registry,
+      row,
+      increase: false,
+      decrease: true,
+    })
 
     // Now that we know for sure that the row belongs in the view, we need to figure
     // out if is before, inside or after the buffered results.
@@ -1227,6 +2877,7 @@ export const actions = {
     // accordingly.
     if (exists) {
       commit('DELETE_ROW_IN_BUFFER', row)
+      await dispatch('correctMultiSelect')
       return
     }
 
@@ -1236,7 +2887,7 @@ export const actions = {
       this.$registry,
       view.sortings,
       fields,
-      primary
+      view.group_bys
     )
     allRowsCopy.sort(sortFunction)
     const index = allRowsCopy.findIndex((r) => r.id === row.id)
@@ -1249,25 +2900,23 @@ export const actions = {
 
     // Regardless of where the
     commit('SET_COUNT', getters.getCount - 1)
+    await dispatch('correctMultiSelect')
   },
   /**
    * Triggered when a row has been changed, or has a pending change in the provided
    * overrides.
    */
-  onRowChange({ dispatch }, { view, row, fields, primary, overrides = {} }) {
-    dispatch('updateMatchFilters', { view, row, fields, primary, overrides })
-    dispatch('updateMatchSortings', { view, row, fields, primary, overrides })
-    dispatch('updateSearchMatchesForRow', { row, fields, primary, overrides })
+  onRowChange({ dispatch }, { view, row, fields, overrides = {} }) {
+    dispatch('updateMatchFilters', { view, row, fields, overrides })
+    dispatch('updateMatchSortings', { view, row, fields, overrides })
+    dispatch('updateSearchMatchesForRow', { row, fields, overrides })
   },
   /**
    * Checks if the given row still matches the given view filters. The row's
    * matchFilters value is updated accordingly. It is also possible to provide some
    * override values that not actually belong to the row to do some preliminary checks.
    */
-  updateMatchFilters(
-    { commit },
-    { view, row, fields, primary, overrides = {} }
-  ) {
+  updateMatchFilters({ commit }, { view, row, fields, overrides = {} }) {
     const values = JSON.parse(JSON.stringify(row))
     Object.assign(values, overrides)
 
@@ -1278,7 +2927,8 @@ export const actions = {
           this.$registry,
           view.filter_type,
           view.filters,
-          primary === null ? fields : [primary, ...fields],
+          view.filter_groups,
+          fields,
           values
         )
     commit('SET_ROW_MATCH_FILTERS', { row, value: matches })
@@ -1292,7 +2942,6 @@ export const actions = {
     { commit, dispatch, getters, state },
     {
       fields,
-      primary = null,
       activeSearchTerm = state.activeSearchTerm,
       hideRowsNotMatchingSearch = state.hideRowsNotMatchingSearch,
       refreshMatchesOnClient = true,
@@ -1301,7 +2950,11 @@ export const actions = {
     commit('SET_SEARCH', { activeSearchTerm, hideRowsNotMatchingSearch })
     if (refreshMatchesOnClient) {
       getters.getAllRows.forEach((row) =>
-        dispatch('updateSearchMatchesForRow', { row, fields, primary })
+        dispatch('updateSearchMatchesForRow', {
+          row,
+          fields,
+          forced: true,
+        })
       )
     }
   },
@@ -1312,18 +2965,22 @@ export const actions = {
    */
   updateSearchMatchesForRow(
     { commit, getters, rootGetters },
-    { row, fields, primary = null, overrides }
+    { row, fields = null, overrides, forced = false }
   ) {
-    const rowSearchMatches = calculateSingleRowSearchMatches(
-      row,
-      getters.getActiveSearchTerm,
-      getters.isHidingRowsNotMatchingSearch,
-      [primary, ...fields],
-      this.$registry,
-      overrides
-    )
+    // Avoid computing search on table loading
+    if (getters.getActiveSearchTerm || forced) {
+      const rowSearchMatches = calculateSingleRowSearchMatches(
+        row,
+        getters.getActiveSearchTerm,
+        getters.isHidingRowsNotMatchingSearch,
+        fields,
+        this.$registry,
+        getDefaultSearchModeFromEnv(this.$config),
+        overrides
+      )
 
-    commit('SET_ROW_SEARCH_MATCHES', rowSearchMatches)
+      commit('SET_ROW_SEARCH_MATCHES', rowSearchMatches)
+    }
   },
   /**
    * Checks if the given row index is still the same. The row's matchSortings value is
@@ -1332,7 +2989,7 @@ export const actions = {
    */
   updateMatchSortings(
     { commit, getters },
-    { view, row, fields, primary = null, overrides = {} }
+    { view, row, fields, overrides = {} }
   ) {
     const values = clone(row)
     Object.assign(values, overrides)
@@ -1342,38 +2999,148 @@ export const actions = {
     const sortedRows = clone(allRows)
     sortedRows[currentIndex] = values
     sortedRows.sort(
-      getRowSortFunction(this.$registry, view.sortings, fields, primary)
+      getRowSortFunction(this.$registry, view.sortings, fields, view.group_bys)
     )
     const newIndex = sortedRows.findIndex((r) => r.id === row.id)
 
     commit('SET_ROW_MATCH_SORTINGS', { row, value: currentIndex === newIndex })
   },
   /**
+   * Refreshes the row in the store if the given rowId exists. If the row
+   * doesn't exist in the store, nothing will happen. This method ensures that
+   * the row refreshed is the one of this store, because it could be that the
+   * row object could come from another store.
+   */
+  async refreshRowById(
+    { dispatch, getters },
+    {
+      grid,
+      rowId,
+      fields,
+      getScrollTop = undefined,
+      isRowOpenedInModal = undefined,
+    }
+  ) {
+    const row = getters.getRow(rowId)
+    if (row === undefined) {
+      return
+    }
+
+    await dispatch('refreshRow', {
+      grid,
+      row,
+      fields,
+      getScrollTop,
+      isRowOpenedInModal,
+    })
+  },
+  /**
    * The row is going to be removed or repositioned if the matchFilters and
    * matchSortings state is false. It will make the state correct.
    */
   async refreshRow(
-    { dispatch, commit, getters },
-    { grid, row, fields, primary, getScrollTop }
+    { dispatch, commit },
+    {
+      grid,
+      row,
+      fields,
+      getScrollTop = undefined,
+      isRowOpenedInModal = undefined,
+    }
   ) {
-    const rowShouldBeHidden = !row._.matchFilters || !row._.matchSearch
-    if (row._.selectedBy.length === 0 && rowShouldBeHidden) {
+    const rowShouldBeHidden =
+      (!row._.matchFilters || !row._.matchSearch) && !row._.loading
+    const openedInModal =
+      isRowOpenedInModal !== undefined ? isRowOpenedInModal(row) : false
+    if (row._.selectedBy.length === 0 && rowShouldBeHidden && !openedInModal) {
       commit('DELETE_ROW_IN_BUFFER', row)
     } else if (row._.selectedBy.length === 0 && !row._.matchSortings) {
       await dispatch('updatedExistingRow', {
         view: grid,
         fields,
-        primary,
         row,
         values: row,
       })
       commit('SET_ROW_MATCH_SORTINGS', { row, value: true })
     }
-    dispatch('fetchByScrollTopDelayed', {
-      scrollTop: getScrollTop(),
-      fields,
-      primary,
+    if (getScrollTop !== undefined) {
+      dispatch('fetchByScrollTopDelayed', {
+        scrollTop: getScrollTop(),
+        fields,
+      })
+    }
+  },
+  updateRowMetadata(
+    { commit, getters, dispatch },
+    { tableId, rowId, rowMetadataType, updateFunction }
+  ) {
+    const row = getters.getRow(rowId)
+    if (row) {
+      commit('UPDATE_ROW_METADATA', { row, rowMetadataType, updateFunction })
+    }
+  },
+  /**
+   * Clears the values of all multi-selected cells by updating them to their null values.
+   */
+  async clearValuesFromMultipleCellSelection(
+    { getters, dispatch },
+    { table, view, allVisibleFields, allFieldsInTable, getScrollTop }
+  ) {
+    const [minFieldIndex, maxFieldIndex] =
+      getters.getMultiSelectFieldIndexSorted
+
+    const [minRowIndex, maxRowIndex] = getters.getMultiSelectRowIndexSorted
+    const numberOfRowsSelected = maxRowIndex - minRowIndex + 1
+
+    const selectedFields = allVisibleFields.slice(
+      minFieldIndex,
+      maxFieldIndex + 1
+    )
+
+    // Get the empty value for each selected field
+    const emptyValues = selectedFields.map((field) =>
+      this.$registry.get('field', field.type).getEmptyValue(field)
+    )
+
+    // Copy the empty value array once for each row selected
+    const data = []
+    for (let index = 0; index < numberOfRowsSelected; index++) {
+      data.push(emptyValues)
+    }
+
+    await dispatch('updateDataIntoCells', {
+      table,
+      view,
+      allVisibleFields,
+      allFieldsInTable,
+      getScrollTop,
+      textData: data,
+      rowIndex: minRowIndex,
+      fieldIndex: minFieldIndex,
     })
+  },
+  /**
+   * Add the fieldId to the list of pending field operations for the given rowIds.
+   * This is used to show a loading spinner when a field is being updated. For example,
+   * the AI field type uses this to show a spinner when the AI values are being
+   * generated in a background task.
+   */
+  setPendingFieldOperations({ commit }, { fieldId, rowIds, value = true }) {
+    commit('SET_PENDING_FIELD_OPERATIONS', { fieldId, rowIds, value })
+  },
+  AIValuesGenerationError({ commit, dispatch }, { fieldId, rowIds }) {
+    commit('SET_PENDING_FIELD_OPERATIONS', { fieldId, rowIds, value: false })
+    dispatch(
+      'toast/error',
+      {
+        title: this.$i18n.t('gridView.AIValuesGenerationErrorTitle'),
+        message: this.$i18n.t('gridView.AIValuesGenerationErrorMessage'),
+      },
+      { root: true }
+    )
+  },
+  setRowHeight({ commit, dispatch }, value) {
+    commit('UPDATE_ROW_HEIGHT', value)
   },
 }
 
@@ -1438,6 +3205,43 @@ export const getters = {
   getAllFieldOptions(state) {
     return state.fieldOptions
   },
+  getOrderedFieldOptions: (state, getters) => (fields) => {
+    const primaryField = fields.find((f) => f.primary === true)
+    const primaryFieldId = primaryField?.id || -1
+
+    return Object.entries(getters.getAllFieldOptions)
+      .map(([fieldIdStr, options]) => [parseInt(fieldIdStr), options])
+      .sort(([a, { order: orderA }], [b, { order: orderB }]) => {
+        const isAPrimary = a === primaryFieldId
+        const isBPrimary = b === primaryFieldId
+
+        // Place primary field first
+        if (isAPrimary === true && !isBPrimary) {
+          return -1
+        } else if (isBPrimary === true && !isAPrimary) {
+          return 1
+        }
+
+        // Then by order
+        if (orderA > orderB) {
+          return 1
+        } else if (orderA < orderB) {
+          return -1
+        }
+
+        // Finally by id if order is the same
+        return a - b
+      })
+  },
+  getOrderedVisibleFieldOptions: (state, getters) => (fields) => {
+    return getters
+      .getOrderedFieldOptions(fields)
+      .filter(([fieldId, options]) => options.hidden === false)
+  },
+  getNumberOfVisibleFields(state) {
+    return Object.values(state.fieldOptions).filter((fo) => fo.hidden === false)
+      .length
+  },
   isFirst: (state) => (id) => {
     const index = state.rows.findIndex((row) => row.id === id)
     return index === 0
@@ -1467,6 +3271,132 @@ export const getters = {
       }
     })
     return order
+  },
+  isMultiSelectActive(state) {
+    return state.multiSelectActive
+  },
+  isMultiSelectHolding(state) {
+    return state.multiSelectHolding
+  },
+  getMultiSelectRowIndexSorted(state) {
+    return [
+      Math.min(state.multiSelectHeadRowIndex, state.multiSelectTailRowIndex),
+      Math.max(state.multiSelectHeadRowIndex, state.multiSelectTailRowIndex),
+    ]
+  },
+  getMultiSelectFieldIndexSorted(state) {
+    return [
+      Math.min(
+        state.multiSelectHeadFieldIndex,
+        state.multiSelectTailFieldIndex
+      ),
+      Math.max(
+        state.multiSelectHeadFieldIndex,
+        state.multiSelectTailFieldIndex
+      ),
+    ]
+  },
+  getMultiSelectHeadFieldIndex(state) {
+    return state.multiSelectHeadFieldIndex
+  },
+  getMultiSelectTailFieldIndex(state) {
+    return state.multiSelectTailFieldIndex
+  },
+  getMultiSelectHeadRowIndex(state) {
+    return state.multiSelectHeadRowIndex
+  },
+  getMultiSelectTailRowIndex(state) {
+    return state.multiSelectTailRowIndex
+  },
+  getMultiSelectStartRowIndex(state) {
+    return state.multiSelectStartRowIndex
+  },
+  getMultiSelectStartFieldIndex(state) {
+    return state.multiSelectStartFieldIndex
+  },
+  // Get the index of a row given it's row id.
+  // This will calculate the row index from the current buffer position and offset.
+  getRowIndexById: (state, getters) => (rowId) => {
+    const bufferIndex = state.rows.findIndex((r) => r.id === rowId)
+    if (bufferIndex !== -1) {
+      return getters.getBufferStartIndex + bufferIndex
+    }
+    return -1
+  },
+  getRowIdByIndex: (state, getters) => (rowIndex) => {
+    const row = state.rows[rowIndex - getters.getBufferStartIndex]
+    if (row) {
+      return row.id
+    }
+    return -1
+  },
+  getFieldIdByIndex: (state, getters) => (fieldIndex, fields) => {
+    const orderedFieldOptions = getters.getOrderedVisibleFieldOptions(fields)
+    if (orderedFieldOptions[fieldIndex]) {
+      return orderedFieldOptions[fieldIndex][0]
+    }
+    return -1
+  },
+  // Check if all the multi-select rows are within the row buffer
+  areMultiSelectRowsWithinBuffer(state, getters) {
+    const [minRow, maxRow] = getters.getMultiSelectRowIndexSorted
+
+    return (
+      minRow >= getters.getBufferStartIndex &&
+      maxRow <= getters.getBufferEndIndex
+    )
+  },
+  // Return all rows within a multi-select grid if they are within the current row buffer
+  getSelectedRows(state, getters) {
+    const [minRow, maxRow] = getters.getMultiSelectRowIndexSorted
+
+    if (getters.areMultiSelectRowsWithinBuffer) {
+      return state.rows.slice(
+        minRow - state.bufferStartIndex,
+        maxRow - state.bufferStartIndex + 1
+      )
+    }
+  },
+  getSelectedFields: (state, getters) => (fields) => {
+    const [minField, maxField] = getters.getMultiSelectFieldIndexSorted
+    const selectedFields = []
+
+    const fieldMap = fields.reduce((acc, field) => {
+      acc[field.id] = field
+      return acc
+    }, {})
+
+    for (let i = minField; i <= maxField; i++) {
+      const fieldId = getters.getFieldIdByIndex(i, fields)
+      if (fieldId !== -1) {
+        selectedFields.push(fieldMap[fieldId])
+      }
+    }
+    return selectedFields
+  },
+  getAllFieldAggregationData(state) {
+    return state.fieldAggregationData
+  },
+  hasSelectedCell(state) {
+    return state.rows.some((row) => {
+      return row._.selected && row._.selectedFieldId !== -1
+    })
+  },
+  getActiveGroupBys(state) {
+    return state.activeGroupBys
+  },
+  getGroupByMetadata(state) {
+    return state.groupByMetadata
+  },
+  getAdhocFiltering(state) {
+    return state.adhocFiltering
+  },
+  getAdhocSorting(state) {
+    return state.adhocSorting
+  },
+  hasPendingFieldOps: (state) => (fieldId, rowId) => {
+    const key = getPendingOperationKey(fieldId, rowId)
+    return state.pendingFieldOps[key] !== undefined
   },
 }
 

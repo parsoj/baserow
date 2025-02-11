@@ -1,24 +1,26 @@
 <template>
   <form @submit.prevent="submit">
-    <div class="control">
-      <label class="control__label">
-        <i class="fas fa-font"></i>
-        Name
-      </label>
-      <div class="control__elements">
-        <input
-          ref="name"
-          v-model="values.name"
-          :class="{ 'input--error': $v.values.name.$error }"
-          type="text"
-          class="input input--large"
-          @blur="$v.values.name.$touch()"
-        />
-        <div v-if="$v.values.name.$error" class="error">
-          This field is required.
-        </div>
-      </div>
-    </div>
+    <FormGroup
+      :error="fieldHasErrors('name')"
+      small-label
+      :label="$t('applicationForm.nameLabel')"
+      required
+    >
+      <FormInput
+        ref="name"
+        v-model="values.name"
+        size="large"
+        :error="fieldHasErrors('name')"
+        @focus.once="$event.target.select()"
+        @blur="$v.values.name.$touch()"
+      >
+      </FormInput>
+
+      <template #error>
+        {{ $t('error.requiredField') }}
+      </template>
+    </FormGroup>
+
     <slot></slot>
   </form>
 </template>
@@ -31,10 +33,25 @@ import form from '@baserow/modules/core/mixins/form'
 export default {
   name: 'ApplicationForm',
   mixins: [form],
+  props: {
+    defaultName: {
+      type: String,
+      required: false,
+      default: '',
+    },
+    loading: {
+      type: Boolean,
+      required: true,
+    },
+    workspace: {
+      type: Object,
+      required: true,
+    },
+  },
   data() {
     return {
       values: {
-        name: '',
+        name: this.defaultValues.name,
       },
     }
   },

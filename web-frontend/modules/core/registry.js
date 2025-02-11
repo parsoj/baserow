@@ -3,6 +3,10 @@
  * registry.
  */
 export class Registerable {
+  constructor({ app } = {}) {
+    this.app = app
+  }
+
   /**
    * Must return a string with the unique name, this must be the same as the
    * type used in the backend.
@@ -13,6 +17,28 @@ export class Registerable {
 
   getType() {
     return this.constructor.getType()
+  }
+
+  get type() {
+    return this.constructor.getType()
+  }
+
+  set type(newType) {
+    // Does nothing as the type shouldn't be modifiable
+  }
+
+  /**
+   * Returns a weight to order the registerable. Used when you want an ordered list
+   * of all registered items.
+   * @returns order weight. Lower value first in the list.
+   */
+  getSort() {
+    return 0
+  }
+
+  $t(key) {
+    const { i18n } = this.app
+    return i18n.t(key)
   }
 }
 
@@ -95,6 +121,17 @@ export class Registry {
       )
     }
     return this.registry[namespace]
+  }
+
+  /**
+   * Returns a list of the objects that are in the given namespace ordered by their
+   * `.getOrder()` value. Lower value first then for equality, the insertion order is
+   * considered.
+   */
+  getOrderedList(namespace) {
+    return Object.values(this.getAll(namespace)).sort(
+      (typeA, typeB) => typeA.getOrder() - typeB.getOrder()
+    )
   }
 
   /**

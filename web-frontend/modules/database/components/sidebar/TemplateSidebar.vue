@@ -2,17 +2,13 @@
   <li
     class="tree__item"
     :class="{
-      active: application._.selected,
       'tree__item--loading': application._.loading,
     }"
   >
     <div class="tree__action">
       <a class="tree__link" @click="$emit('selected', application)">
-        <i
-          class="tree__icon tree__icon--type fas"
-          :class="'fa-' + application._.type.iconClass"
-        ></i>
-        {{ application.name }}
+        <i class="tree__icon" :class="application._.type.iconClass"></i>
+        <span class="tree__link-text">{{ application.name }}</span>
       </a>
     </div>
     <template v-if="application._.selected">
@@ -24,6 +20,10 @@
           :class="{ active: isTableActive(table) }"
         >
           <a class="tree__sub-link" @click="selectTable(application, table)">
+            <i
+              v-if="table.data_sync"
+              class="context__menu-item-icon iconoir-data-transfer-down"
+            ></i>
             {{ table.name }}
           </a>
         </li>

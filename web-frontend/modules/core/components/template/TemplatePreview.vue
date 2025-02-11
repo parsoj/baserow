@@ -2,8 +2,11 @@
   <div>
     <template v-if="template !== null">
       <div v-if="loading" class="loading-absolute-center"></div>
-      <div v-else class="layout" :class="{ 'layout--collapsed': collapsed }">
-        <div class="layout__col-1">
+      <div v-else class="layout">
+        <div
+          class="layout__col-1"
+          :style="{ width: collapsed ? '48px' : '240px' }"
+        >
           <TemplateSidebar
             :template="template"
             :applications="applications"
@@ -13,7 +16,10 @@
             @collapse-toggled="collapsed = !collapsed"
           ></TemplateSidebar>
         </div>
-        <div class="layout__col-2">
+        <div
+          class="layout__col-2"
+          :style="{ left: collapsed ? '48px' : '240px' }"
+        >
           <component
             :is="pageComponent"
             v-if="page !== null"
@@ -89,12 +95,12 @@ export default {
 
       try {
         const { data } = await ApplicationService(this.$client).fetchAll(
-          template.group_id
+          template.workspace_id
         )
-        data.forEach((application) => {
+
+        this.applications = data.map((application) =>
           populateApplication(application, this.$registry)
-        })
-        this.applications = data
+        )
 
         // Check if there is an application that can give us an initial page. The
         // database application type would for example return the first table as page.
@@ -120,7 +126,10 @@ export default {
       }
     },
     selectPage({ application, value }) {
-      this.page = { application, value }
+      this.page = {
+        application,
+        value,
+      }
     },
   },
 }

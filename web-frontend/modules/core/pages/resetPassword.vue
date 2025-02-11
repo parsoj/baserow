@@ -1,80 +1,118 @@
 <template>
-  <div>
+  <div class="auth__wrapper">
     <div v-if="!success">
-      <h1 class="box__title">Reset password</h1>
-      <Error :error="error"></Error>
-      <form @submit.prevent="resetPassword">
-        <div class="control">
-          <label class="control__label">New password</label>
-          <div class="control__elements">
-            <input
-              v-model="account.password"
-              :class="{ 'input--error': $v.account.password.$error }"
-              type="password"
-              class="input input--large"
-              @blur="$v.account.password.$touch()"
-            />
-            <div v-if="$v.account.password.$error" class="error">
-              A new password is required.
-            </div>
-          </div>
-        </div>
-        <div class="control">
-          <label class="control__label">Repeat new password</label>
-          <div class="control__elements">
-            <input
-              v-model="account.passwordConfirm"
-              :class="{ 'input--error': $v.account.passwordConfirm.$error }"
-              type="password"
-              class="input input--large"
-              @blur="$v.account.passwordConfirm.$touch()"
-            />
-            <div v-if="$v.account.passwordConfirm.$error" class="error">
-              This field must match your new password field.
-            </div>
-          </div>
-        </div>
-        <div class="actions">
-          <ul class="action__links">
-            <li>
-              <nuxt-link :to="{ name: 'login' }">
-                <i class="fas fa-arrow-left"></i>
-                Back to login
-              </nuxt-link>
-            </li>
-          </ul>
-          <button
-            :class="{ 'button--loading': loading }"
-            class="button button--large"
-            :disabled="loading"
-          >
-            Change password
-            <i class="fas fa-pencil-alt"></i>
-          </button>
-        </div>
-      </form>
-    </div>
-    <div v-if="success" class="box__message">
-      <div class="box__message-icon">
-        <i class="fas fa-check"></i>
+      <div class="auth__logo">
+        <nuxt-link :to="{ name: 'index' }">
+          <Logo />
+        </nuxt-link>
       </div>
-      <h1 class="box__message-title">Password changed</h1>
-      <nuxt-link :to="{ name: 'login' }" class="button button--large">
-        <i class="fas fa-arrow-left"></i>
-        Back to login
-      </nuxt-link>
+
+      <div class="auth__head auth__head-title">
+        <h1>{{ $t('resetPassword.title') }}</h1>
+        <LangPicker />
+      </div>
+
+      <!-- Disabled info message -->
+      <template v-if="!settings.allow_reset_password">
+        <Alert type="error">
+          <template #title>{{ $t('resetPassword.disabled') }}</template>
+          <p>{{ $t('resetPassword.disabledMessage') }}</p>
+        </Alert>
+        <nuxt-link :to="{ name: 'login' }" class="button button--full-width">
+          <i class="iconoir-arrow-left"></i>
+          {{ $t('action.backToLogin') }}
+        </nuxt-link>
+      </template>
+
+      <!-- Form -->
+      <div v-else>
+        <Error :error="error"></Error>
+        <form @submit.prevent="resetPassword">
+          <FormGroup
+            small-label
+            :label="$t('resetPassword.newPassword')"
+            required
+            class="mb-24"
+          >
+            <PasswordInput
+              v-model="account.password"
+              :validation-state="$v.account.password"
+              :placeholder="$t('signup.passwordPlaceholder')"
+              :error-placeholder-class="'auth__control-error'"
+              :show-error-icon="true"
+            />
+          </FormGroup>
+
+          <FormGroup
+            small-label
+            :label="$t('resetPassword.repeatNewPassword')"
+            required
+            class="mb-32"
+            :error="$v.account.passwordConfirm.$error"
+          >
+            <FormInput
+              v-model="account.passwordConfirm"
+              :error="$v.account.passwordConfirm.$error"
+              type="password"
+              size="large"
+              @blur="$v.account.passwordConfirm.$touch()"
+            >
+            </FormInput>
+
+            <template #error>
+              {{ $t('error.notMatchingPassword') }}
+            </template>
+          </FormGroup>
+
+          <div class="auth__action mb-32">
+            <Button
+              type="primary"
+              full-width
+              size="large"
+              :loading="loading"
+              :disabled="loading || success"
+            >
+              {{ $t('resetPassword.submit') }}
+            </Button>
+          </div>
+          <div>
+            <ul class="auth__action-links">
+              <li class="auth__action-link">
+                <nuxt-link :to="{ name: 'login' }">
+                  {{ $t('action.backToLogin') }}
+                </nuxt-link>
+              </li>
+            </ul>
+          </div>
+        </form>
+      </div>
+    </div>
+    <div v-if="success" class="auth__wrapper auth__wrapper--small-centered">
+      <ButtonIcon icon="iconoir-check" />
+      <h2>{{ $t('resetPassword.changed') }}</h2>
+      <p>
+        {{ $t('resetPassword.message') }}
+      </p>
+      <Button tag="nuxt-link" :to="{ name: 'login' }" size="large">
+        {{ $t('action.backToLogin') }}
+      </Button>
     </div>
   </div>
 </template>
 
 <script>
-import { required, sameAs } from 'vuelidate/lib/validators'
+import { sameAs } from 'vuelidate/lib/validators'
 
+import PasswordInput from '@baserow/modules/core/components/helpers/PasswordInput'
+import LangPicker from '@baserow/modules/core/components/LangPicker'
+import { passwordValidation } from '@baserow/modules/core/validators'
 import { ResponseErrorMessage } from '@baserow/modules/core/plugins/clientHandler'
 import error from '@baserow/modules/core/mixins/error'
 import AuthService from '@baserow/modules/core/services/auth'
+import { mapGetters } from 'vuex'
 
 export default {
+  components: { LangPicker, PasswordInput },
   mixins: [error],
   layout: 'login',
   data() {
@@ -89,8 +127,13 @@ export default {
   },
   head() {
     return {
-      title: 'Reset password',
+      title: this.$t('resetPassword.title'),
     }
+  },
+  computed: {
+    ...mapGetters({
+      settings: 'settings/get',
+    }),
   },
   methods: {
     async resetPassword() {
@@ -114,12 +157,12 @@ export default {
         this.loading = false
         this.handleError(error, 'resetPassword', {
           BAD_TOKEN_SIGNATURE: new ResponseErrorMessage(
-            'Invalid link.',
-            'Could not reset the password because the link is invalid.'
+            this.$t('resetPassword.errorInvalidLinkTitle'),
+            this.$t('resetPassword.errorInvalidLinkMessage')
           ),
           EXPIRED_TOKEN_SIGNATURE: new ResponseErrorMessage(
-            'Link expired',
-            'The password reset link has expired. Please request another one.'
+            this.$t('resetPassword.errorLinkExpiredTitle'),
+            this.$t('resetPassword.errorLinkExpiredMessage')
           ),
         })
       }
@@ -127,7 +170,7 @@ export default {
   },
   validations: {
     account: {
-      password: { required },
+      password: passwordValidation,
       passwordConfirm: {
         sameAsPassword: sameAs('password'),
       },

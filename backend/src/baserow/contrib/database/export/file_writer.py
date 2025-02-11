@@ -2,12 +2,14 @@ import abc
 import time
 from typing import Any, Callable
 
-import unicodecsv as csv
 from django.core.paginator import Paginator
 from django.db.models import QuerySet
 
+import unicodecsv as csv
+
 from baserow.contrib.database.export.exceptions import ExportJobCanceledException
 from baserow.contrib.database.table.models import FieldObject
+from baserow.contrib.database.views.filters import AdHocFilters
 from baserow.contrib.database.views.handler import ViewHandler
 from baserow.contrib.database.views.registries import view_type_registry
 
@@ -104,7 +106,7 @@ class PaginatedExportJobFileWriter(FileWriter):
 
     def _check_and_update_job(self, current_row, total_rows):
         """
-        Checks if enough time has passed and if so checks the status of the job and
+        Checks if enough time has passed and if so checks the state of the job and
         updates its progress percentage.
         Will raise a ExportJobCanceledException exception if when a check occurs
         the job has been cancelled.
@@ -127,7 +129,7 @@ class PaginatedExportJobFileWriter(FileWriter):
             if self.job.is_cancelled_or_expired():
                 raise ExportJobCanceledException()
             else:
-                self.job.progress_percentage = current_row / total_rows
+                self.job.progress_percentage = current_row / total_rows * 100
                 self.job.save()
 
 
@@ -136,6 +138,8 @@ class QuerysetSerializer(abc.ABC):
     A class knows how to serialize a given queryset and the fields of said queryset to
     a file.
     """
+
+    can_handle_rich_value = False
 
     def __init__(self, queryset, ordered_field_objects):
         self.queryset = queryset
@@ -167,27 +171,53 @@ class QuerysetSerializer(abc.ABC):
         return cls(qs, ordered_field_objects)
 
     @classmethod
-    def for_view(cls, view) -> "QuerysetSerializer":
+    def for_view(cls, view, visible_field_ids_in_order=None) -> "QuerysetSerializer":
         """
         Generates a queryset serializer for the provided view according to it's view
         type and any relevant view settings it might have (filters, sorts,
         hidden columns etc).
 
         :param view: The view to serialize.
+        :param visible_field_ids_in_order: Optionally provide a list of field IDs in
+            the correct order. Only those fields will be included in the export.
         :return: A QuerysetSerializer ready to serialize the table.
         """
 
         view_type = view_type_registry.get_by_model(view.specific_class)
-        fields, model = view_type.get_fields_and_model(view)
+        visible_field_objects_in_view, model = view_type.get_visible_fields_and_model(
+            view
+        )
+        if visible_field_ids_in_order is None:
+            fields = visible_field_objects_in_view
+        else:
+            # Re-order and return only the fields in visible_field_ids_in_order
+            field_map = {
+                field_object["field"].id: field_object
+                for field_object in visible_field_objects_in_view
+            }
+            fields = [
+                field_map[field_id]
+                for field_id in visible_field_ids_in_order
+                if field_id in field_map
+            ]
         qs = ViewHandler().get_queryset(view, model=model)
-        return cls(qs, fields)
+        return cls(qs, fields), visible_field_objects_in_view
 
-    @staticmethod
-    def _get_field_serializer(field_object: FieldObject) -> Callable[[Any], Any]:
+    def add_ad_hoc_filters_dict_to_queryset(self, filters_dict, only_by_field_ids=None):
+        filters = AdHocFilters.from_dict(filters_dict)
+        filters.only_filter_by_field_ids = only_by_field_ids
+        self.queryset = filters.apply_to_queryset(self.queryset.model, self.queryset)
+
+    def add_add_hoc_order_by_to_queryset(self, order_by, only_by_field_ids=None):
+        self.queryset = self.queryset.order_by_fields_string(
+            order_by, only_order_by_field_ids=only_by_field_ids
+        )
+
+    def _get_field_serializer(self, field_object: FieldObject) -> Callable[[Any], Any]:
         """
         An internal standard method which generates a serializer function for a given
         field_object. It will delegate to the field_types get_export_value on
-        how to convert a given field to a python value to be then writen to the file.
+        how to convert a given field to a python value to be then written to the file.
 
         :param field_object: The field object to generate a serializer for.
         :return: A callable function which when given a row will return a tuple of the
@@ -202,7 +232,9 @@ class QuerysetSerializer(abc.ABC):
             if value is None:
                 result = ""
             else:
-                result = field_object["type"].get_export_value(value, field_object)
+                result = field_object["type"].get_export_value(
+                    value, field_object, rich_value=self.can_handle_rich_value
+                )
 
             return (
                 field_object["name"],

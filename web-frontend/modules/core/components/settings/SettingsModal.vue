@@ -1,11 +1,15 @@
 <template>
-  <Modal :sidebar="true">
+  <Modal :left-sidebar="true" :left-sidebar-scrollable="true">
     <template #sidebar>
       <div class="modal-sidebar__head">
-        <div class="modal-sidebar__head-initials-icon">
-          {{ name | nameAbbreviation }}
+        <Avatar
+          rounded
+          :initials="name | nameAbbreviation"
+          size="large"
+        ></Avatar>
+        <div class="modal-sidebar__head-name">
+          {{ $t('settingsModal.title') }}
         </div>
-        <div class="modal-sidebar__head-name">Settings</div>
       </div>
       <ul class="modal-sidebar__nav">
         <li v-for="setting in registeredSettings" :key="setting.type">
@@ -14,11 +18,8 @@
             :class="{ active: page === setting.type }"
             @click="setPage(setting.type)"
           >
-            <i
-              class="fas modal-sidebar__nav-icon"
-              :class="'fa-' + setting.iconClass"
-            ></i>
-            {{ setting.name }}
+            <i class="modal-sidebar__nav-icon" :class="setting.iconClass"></i>
+            {{ setting.getName() }}
           </a>
         </li>
       </ul>
@@ -47,7 +48,9 @@ export default {
   },
   computed: {
     registeredSettings() {
-      return this.$registry.getAll('settings')
+      return this.$registry
+        .getOrderedList('settings')
+        .filter((settings) => settings.isEnabled() === true)
     },
     settingPageComponent() {
       const active = Object.values(this.$registry.getAll('settings')).find(
@@ -59,6 +62,9 @@ export default {
       name: 'auth/getName',
     }),
   },
+  async mounted() {
+    await this.$store.dispatch('authProvider/fetchLoginOptions')
+  },
   methods: {
     setPage(page) {
       this.page = page
@@ -66,8 +72,13 @@ export default {
     isPage(page) {
       return this.page === page
     },
-    show(page, ...args) {
-      this.page = page
+    show(page = null, ...args) {
+      if (page === null) {
+        const settings = Object.values(this.$registry.getAll('settings'))
+        this.page = settings.length > 0 ? settings[0].type : ''
+      } else {
+        this.page = page
+      }
       return modal.methods.show.call(this, ...args)
     },
   },

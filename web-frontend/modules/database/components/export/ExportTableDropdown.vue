@@ -5,7 +5,11 @@
     :disabled="loading"
     @input="$emit('input', $event)"
   >
-    <DropdownItem name="Export entire table" :value="null"></DropdownItem>
+    <DropdownItem
+      :name="$t('exportTableDropdown.exportEntireTable')"
+      :value="null"
+    ></DropdownItem>
+
     <DropdownItem
       v-for="v in views"
       :key="v.id"

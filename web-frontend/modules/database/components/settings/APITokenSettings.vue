@@ -1,21 +1,18 @@
 <template>
   <div>
     <template v-if="page === 'list'">
-      <h2 class="box__title">Personal API tokens</h2>
+      <h2 class="box__title">{{ $t('apiTokenSettings.title') }}</h2>
       <div class="align-right">
         <a class="button button--primary" @click.prevent="page = 'create'">
-          Create token
-          <i class="fas fa-plus"></i>
+          {{ $t('apiTokenSettings.createToken') }}
+          <i class="iconoir-plus"></i>
         </a>
       </div>
       <Error :error="error"></Error>
       <div v-if="listLoading" class="loading"></div>
       <div v-else>
         <p v-if="tokens.length === 0" class="margin-top-3">
-          You have not yet created an API token. You can use API tokens to
-          authenticate with the REST API endpoints where you can create, read,
-          update and delete rows. It is possible to set permissions on table
-          level.
+          {{ $t('apiTokenSettings.noTokensMessage') }}
         </p>
         <APIToken
           v-for="token in tokens"
@@ -24,38 +21,39 @@
           @deleted="deleteToken(token.id)"
         ></APIToken>
         <div v-if="tokens.length > 0" class="margin-top-3">
-          <SwitchInput :value="true" class="switch--static">
-            Has full permissions, also to all children.
+          <SwitchInput :value="true" small class="margin-bottom-1">
+            {{ $t('apiTokenSettings.hasFullPermissions') }}
           </SwitchInput>
-          <SwitchInput :value="2" class="switch--static">
-            Has only permissions to the selected children.
+          <SwitchInput :value="2" small class="margin-bottom-1">
+            {{ $t('apiTokenSettings.hasOnlySelectedPermissions') }}
           </SwitchInput>
-          <SwitchInput :value="false" class="switch--static">
-            Doesn't have permissions.
+          <SwitchInput :value="false" small>
+            {{ $t('apiTokenSettings.noPermissions') }}
           </SwitchInput>
         </div>
       </div>
     </template>
     <template v-else-if="page === 'create'">
-      <h2 class="box__title">Create new API token</h2>
+      <h2 class="box__title">{{ $t('apiTokenSettings.createNewTitle') }}</h2>
       <Error :error="error"></Error>
       <APITokenForm @submitted="create">
         <div class="actions">
           <ul class="action__links">
             <li>
               <a @click.prevent="page = 'list'">
-                <i class="fas fa-arrow-left"></i>
-                Back to overview
+                <i class="iconoir-arrow-left"></i>
+                {{ $t('apiTokenSettings.backToOverview') }}
               </a>
             </li>
           </ul>
-          <button
-            class="button button--large"
-            :class="{ 'button--loading': createLoading }"
+          <Button
+            type="primary"
+            size="large"
+            :loading="createLoading"
             :disabled="createLoading"
           >
-            Create token
-          </button>
+            {{ $t('apiTokenSettings.createToken') }}
+          </Button>
         </div>
       </APITokenForm>
     </template>
@@ -81,8 +79,8 @@ export default {
     }
   },
   computed: {
-    group() {
-      return this.$store.getters['group/get'](1)
+    workspace() {
+      return this.$store.getters['workspace/get'](1)
     },
   },
   /**

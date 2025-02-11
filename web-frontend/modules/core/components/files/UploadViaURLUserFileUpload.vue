@@ -1,31 +1,31 @@
 <template>
   <div>
-    <h2 class="box__title">Upload from a URL</h2>
+    <h2 class="box__title">{{ $t('uploadViaURLUserFileUpload.title') }}</h2>
     <Error :error="error"></Error>
     <form @submit.prevent="upload(values.url)">
-      <div class="control">
-        <label class="control__label">URL</label>
-        <div class="control__elements">
-          <input
-            v-model="values.url"
-            :class="{ 'input--error': $v.values.url.$error }"
-            type="text"
-            class="input input--large"
-            @blur="$v.values.url.$touch()"
-          />
-          <div v-if="$v.values.url.$error" class="error">
-            A valid URL is required.
-          </div>
-        </div>
-      </div>
-      <div class="actions actions--right">
-        <button
-          :class="{ 'button--loading': loading }"
-          class="button button--large"
-          :disabled="loading"
+      <FormGroup
+        :label="$t('uploadViaURLUserFileUpload.urlLabel')"
+        small-label
+        required
+        :error="$v.values.url.$error"
+      >
+        <FormInput
+          v-model="values.url"
+          size="large"
+          :error="$v.values.url.$error"
+          @blur="$v.values.url.$touch()"
         >
-          Upload
-        </button>
+        </FormInput>
+
+        <template #error>
+          {{ $t('uploadViaURLUserFileUpload.urlError') }}
+        </template>
+      </FormGroup>
+
+      <div class="actions actions--right">
+        <Button type="primary" size="large" :loading="loading">
+          {{ $t('action.upload') }}
+        </Button>
       </div>
     </form>
   </div>

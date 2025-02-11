@@ -1,59 +1,47 @@
 <template>
-  <div>
-    <h1 class="box__title">
-      <nuxt-link :to="{ name: 'index' }">
-        <img src="@baserow/modules/core/static/img/logo.svg" alt="" />
-      </nuxt-link>
-    </h1>
-    <AuthLogin :invitation="invitation" @success="success">
-      <ul class="action__links">
-        <li v-if="settings.allow_new_signups">
-          <nuxt-link :to="{ name: 'signup' }"> Sign up </nuxt-link>
-        </li>
-        <li>
-          <nuxt-link :to="{ name: 'forgot-password' }">
-            Forgot password
-          </nuxt-link>
-        </li>
-      </ul>
-    </AuthLogin>
+  <div class="auth__wrapper">
+    <Login
+      :display-header="true"
+      :redirect-on-success="true"
+      :invitation="invitation"
+      :redirect-by-default="redirectByDefault"
+    ></Login>
   </div>
 </template>
 
 <script>
-import { mapGetters } from 'vuex'
-
-import AuthLogin from '@baserow/modules/core/components/auth/AuthLogin'
-import groupInvitationToken from '@baserow/modules/core/mixins/groupInvitationToken'
+import Login from '@baserow/modules/core/components/auth/Login'
+import workspaceInvitationToken from '@baserow/modules/core/mixins/workspaceInvitationToken'
 
 export default {
-  components: { AuthLogin },
-  mixins: [groupInvitationToken],
+  components: { Login },
   layout: 'login',
+  async asyncData({ app, route, store, redirect }) {
+    if (store.getters['settings/get'].show_admin_signup_page === true) {
+      return redirect({ name: 'signup' })
+    } else if (store.getters['auth/isAuthenticated']) {
+      return redirect({ name: 'dashboard' })
+    }
+    await store.dispatch('authProvider/fetchLoginOptions')
+    return await workspaceInvitationToken.asyncData({ route, app })
+  },
   head() {
     return {
-      title: 'Login',
+      title: this.$t('login.title'),
       link: [
         {
           rel: 'canonical',
-          href: this.$env.PUBLIC_WEB_FRONTEND_URL + this.$route.path,
+          href: this.$config.PUBLIC_WEB_FRONTEND_URL + this.$route.path,
         },
       ],
     }
   },
   computed: {
-    ...mapGetters({
-      settings: 'settings/get',
-    }),
-  },
-  methods: {
-    success() {
-      const { original } = this.$route.query
-      if (original) {
-        this.$nuxt.$router.push(original)
-      } else {
-        this.$nuxt.$router.push({ name: 'dashboard' })
+    redirectByDefault() {
+      if (this.$route.query.noredirect === null) {
+        return false
       }
+      return true
     },
   },
 }

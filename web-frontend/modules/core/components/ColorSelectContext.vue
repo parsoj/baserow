@@ -1,38 +1,56 @@
 <template>
   <Context ref="context" class="color-select-context">
     <div class="color-select-context__colors">
-      <a
-        v-for="(color, index) in colors"
-        :key="color + '-' + index"
-        class="color-select-context__color"
-        :class="
-          'background-color--' +
-          color +
-          ' ' +
-          (color === active ? 'active' : '')
-        "
-        @click="select(color)"
-      ></a>
+      <div
+        v-for="(colorRow, rowIndex) in colors"
+        :key="`color-row-${rowIndex}`"
+        class="color-select-context__row"
+      >
+        <a
+          v-for="(color, index) in colorRow"
+          :key="`color-${index}`"
+          class="color-select-context__color"
+          :class="[
+            `background-color--${color}`,
+            color === active ? 'active' : '',
+          ]"
+          @click="select(color)"
+        >
+          <i
+            v-if="color === active"
+            class="color-select-context__active-icon iconoir-check"
+          ></i>
+        </a>
+      </div>
     </div>
   </Context>
 </template>
 
 <script>
 import context from '@baserow/modules/core/mixins/context'
-import { colors } from '@baserow/modules/core/utils/colors'
+import { colors as colorList } from '@baserow/modules/core/utils/colors'
+
+const defaultColors = [
+  colorList.slice(0, 10),
+  colorList.slice(10, 20),
+  colorList.slice(20, 30),
+  colorList.slice(30, 40),
+]
 
 export default {
-  name: 'CreateFieldContext',
+  name: 'ColorSelectContext',
   mixins: [context],
+  props: {
+    colors: {
+      type: Array,
+      default: () => defaultColors,
+      required: false,
+    },
+  },
   data() {
     return {
       active: '',
     }
-  },
-  computed: {
-    colors() {
-      return colors
-    },
   },
   methods: {
     setActive(color) {

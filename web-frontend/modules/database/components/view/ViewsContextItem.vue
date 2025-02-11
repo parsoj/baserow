@@ -1,5 +1,6 @@
 <template>
   <li
+    v-tooltip="deactivated ? deactivatedText : null"
     class="select__item"
     :class="{
       active: view._.selected,
@@ -7,26 +8,43 @@
       'select__item--no-options': readOnly,
     }"
   >
-    <a class="select__item-link" @click="$emit('selected', view)">
+    <a class="select__item-link" @click="select(view)">
       <div class="select__item-name">
         <i
-          class="select__item-icon fas fa-fw"
-          :class="view._.type.colorClass + ' fa-' + view._.type.iconClass"
+          class="select__item-icon"
+          :class="`${view._.type.colorClass} ${view._.type.iconClass}`"
         ></i>
-        <EditableViewName ref="rename" :view="view"></EditableViewName>
+        <span class="select__item-name-text"
+          ><EditableViewName ref="rename" :view="view"></EditableViewName
+        ></span>
+        <div v-if="deactivated" class="deactivated-label">
+          <i class="iconoir-lock"></i>
+        </div>
       </div>
     </a>
-    <template v-if="!readOnly">
+    <i
+      v-if="view._.selected"
+      class="select__item-active-icon iconoir-check"
+    ></i>
+    <component
+      :is="deactivatedClickModal"
+      v-if="deactivatedClickModal !== null"
+      ref="deactivatedClickModal"
+      :name="viewType.getName()"
+      :workspace="database.workspace"
+    ></component>
+    <template v-if="!readOnly && showViewContext">
       <a
         ref="contextLink"
         class="select__item-options"
         @click="$refs.context.toggle($refs.contextLink, 'bottom', 'right', 0)"
         @mousedown.stop
       >
-        <i class="fas fa-ellipsis-v"></i>
+        <i class="baserow-icon-more-vertical"></i>
       </a>
       <ViewContext
         ref="context"
+        :database="database"
         :table="table"
         :view="view"
         @enable-rename="enableRename"
@@ -45,6 +63,10 @@ export default {
   components: { EditableViewName, ViewContext },
   mixins: [context],
   props: {
+    database: {
+      type: Object,
+      required: true,
+    },
     view: {
       type: Object,
       required: true,
@@ -59,9 +81,67 @@ export default {
       default: true,
     },
   },
+  computed: {
+    viewType() {
+      return this.$registry.get('view', this.view.type)
+    },
+    deactivatedText() {
+      return this.viewType.getDeactivatedText({ view: this.view })
+    },
+    deactivated() {
+      return (
+        !this.readOnly &&
+        this.viewType.isDeactivated(this.database.workspace.id)
+      )
+    },
+    deactivatedClickModal() {
+      return this.deactivated ? this.viewType.getDeactivatedClickModal() : null
+    },
+    showViewContext() {
+      return (
+        this.$hasPermission(
+          'database.table.run_export',
+          this.table,
+          this.database.workspace.id
+        ) ||
+        this.$hasPermission(
+          'database.table.import_rows',
+          this.table,
+          this.database.workspace.id
+        ) ||
+        this.$hasPermission(
+          'database.table.view.duplicate',
+          this.table,
+          this.database.workspace.id
+        ) ||
+        this.$hasPermission(
+          'database.table.create_webhook',
+          this.table,
+          this.database.workspace.id
+        ) ||
+        this.$hasPermission(
+          'database.table.view.update',
+          this.view,
+          this.database.workspace.id
+        ) ||
+        this.$hasPermission(
+          'database.table.view.delete',
+          this.view,
+          this.database.workspace.id
+        )
+      )
+    },
+  },
   methods: {
     enableRename() {
       this.$refs.rename.edit()
+    },
+    select(view) {
+      if (this.deactivated) {
+        this.$refs.deactivatedClickModal.show()
+        return
+      }
+      this.$emit('selected', view)
     },
   },
 }

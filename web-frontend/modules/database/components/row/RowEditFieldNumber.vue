@@ -1,20 +1,33 @@
 <template>
-  <div class="control__elements">
-    <input
+  <FormGroup :error="touched && !valid">
+    <FormInput
       ref="input"
-      v-model="copy"
-      type="text"
-      class="input input--large field-number"
-      :class="{ 'input--error': touched && !valid }"
+      :value="focused ? copy : formattedValue"
+      size="large"
+      :error="touched && !valid"
       :disabled="readOnly"
-      @keyup.enter="$refs.input.blur()"
-      @focus="select()"
-      @blur="unselect()"
+      @keypress="onKeyPress"
+      @keyup.enter="
+        onBlur()
+        $refs.input.blur()
+      "
+      @focus="
+        onFocus()
+        select()
+      "
+      @blur="
+        onBlur()
+        unselect()
+      "
+      @input="handleInput"
     />
-    <div v-show="touched && !valid" class="error">
-      {{ error }}
-    </div>
-  </div>
+
+    <template #error>
+      <span v-show="touched && !valid">
+        {{ error }}
+      </span>
+    </template>
+  </FormGroup>
 </template>
 
 <script>
@@ -24,5 +37,32 @@ import numberField from '@baserow/modules/database/mixins/numberField'
 
 export default {
   mixins: [rowEditField, rowEditFieldInput, numberField],
+  watch: {
+    field: {
+      immediate: true,
+      handler() {
+        this.initCopy(this.value)
+      },
+    },
+    value: {
+      handler(newValue) {
+        this.initCopy(newValue)
+      },
+    },
+  },
+  created() {
+    this.updateFormattedValue(this.field, this.value)
+  },
+  methods: {
+    initCopy(value) {
+      this.copy = this.prepareCopy(value ?? '')
+      this.updateCopy(this.field, this.copy)
+      this.updateFormattedValue(this.field, this.copy)
+    },
+    handleInput(value) {
+      this.updateCopy(this.field, value)
+      this.$emit('input', this.copy)
+    },
+  },
 }
 </script>

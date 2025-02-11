@@ -1,20 +1,16 @@
 <template>
   <div class="select-application">
     <template v-if="hasDatabases">
-      <APIDocsSelectDatabaseGroup
-        v-for="group in groups"
-        :key="group.id"
-        :group="group"
+      <APIDocsSelectDatabaseWorkspace
+        v-for="workspace in workspaces"
+        :key="workspace.id"
+        :workspace="workspace"
         :selected="selected"
-      ></APIDocsSelectDatabaseGroup>
+      ></APIDocsSelectDatabaseWorkspace>
     </template>
-    <p v-else>
-      You need to have at least one database to view the API documentation.
+    <p v-else class="margin-bottom-3">
+      {{ $t('apiDocsSelectDatabase.needOneDatabase') }}
     </p>
-    <nuxt-link :to="{ name: 'dashboard' }" class="select-application__back">
-      <i class="fas fa-arrow-left"></i>
-      Back to dashboard
-    </nuxt-link>
   </div>
 </template>
 
@@ -22,11 +18,11 @@
 import { mapState } from 'vuex'
 
 import { DatabaseApplicationType } from '@baserow/modules/database/applicationTypes'
-import APIDocsSelectDatabaseGroup from '@baserow/modules/database/components/docs/APIDocsSelectDatabaseGroup'
+import APIDocsSelectDatabaseWorkspace from '@baserow/modules/database/components/docs/APIDocsSelectDatabaseWorkspace'
 
 export default {
   name: 'APIDocsSelectDatabase',
-  components: { APIDocsSelectDatabaseGroup },
+  components: { APIDocsSelectDatabaseWorkspace },
   props: {
     selected: {
       type: Number,
@@ -44,7 +40,7 @@ export default {
       )
     },
     ...mapState({
-      groups: (state) => state.group.items,
+      workspaces: (state) => state.workspace.items,
     }),
   },
 }

@@ -1,23 +1,28 @@
 import { StoreItemLookupError } from '@baserow/modules/core/errors'
 import ApplicationService from '@baserow/modules/core/services/application'
 import { clone } from '@baserow/modules/core/utils/object'
+import { CORE_ACTION_SCOPES } from '@baserow/modules/core/utils/undoRedoConstants'
+import { generateHash } from '@baserow/modules/core/utils/hashing'
 
 export function populateApplication(application, registry) {
   const type = registry.get('application', application.type)
 
-  application._ = {
-    type: type.serialize(),
-    loading: false,
-    selected: false,
+  const app = {
+    ...application,
+    _: {
+      type: type.serialize(),
+      loading: false,
+      selected: false,
+    },
   }
-  return type.populate(application)
+  return type.populate(app)
 }
 
 export const state = () => ({
   loading: false,
   loaded: false,
   items: [],
-  selected: {},
+  selected: null,
 })
 
 export const mutations = {
@@ -41,22 +46,27 @@ export const mutations = {
   },
   UPDATE_ITEM(state, { id, values }) {
     const index = state.items.findIndex((item) => item.id === id)
-    Object.assign(state.items[index], state.items[index], values)
+    if (index !== -1) {
+      Object.assign(state.items[index], state.items[index], values)
+    }
   },
-  ORDER_ITEMS(state, { group, order }) {
+  ORDER_ITEMS(state, { workspace, order, isHashed = false }) {
     state.items
-      .filter((item) => item.group.id === group.id)
+      .filter((item) => item.workspace.id === workspace.id)
       .forEach((item) => {
-        const index = order.findIndex((value) => value === item.id)
-        item.order = index === -1 ? 0 : index + 1
+        const itemId = isHashed ? generateHash(item.id) : item.id
+        const index = order.findIndex((value) => value === itemId)
+        item.order = index === -1 ? undefined : index + 1
       })
   },
   DELETE_ITEM(state, id) {
     const index = state.items.findIndex((item) => item.id === id)
-    state.items.splice(index, 1)
+    if (index !== -1) {
+      state.items.splice(index, 1)
+    }
   },
-  DELETE_ITEMS_FOR_GROUP(state, groupId) {
-    state.items = state.items.filter((app) => app.group.id !== groupId)
+  DELETE_ITEMS_FOR_WORKSPACE(state, workspaceId) {
+    state.items = state.items.filter((app) => app.workspace.id !== workspaceId)
   },
   SET_SELECTED(state, application) {
     Object.values(state.items).forEach((item) => {
@@ -94,17 +104,12 @@ export const actions = {
   /**
    * Fetches all the applications for the authenticated user.
    */
-  async fetchAll({ commit }) {
+  async fetchAll({ commit, dispatch }) {
     commit('SET_LOADING', true)
 
     try {
       const { data } = await ApplicationService(this.$client).fetchAll()
-      data.forEach((part, index, d) => {
-        populateApplication(data[index], this.$registry)
-      })
-      commit('SET_ITEMS', data)
-      commit('SET_LOADING', false)
-      commit('SET_LOADED', true)
+      await dispatch('forceSetAll', { applications: data })
     } catch (error) {
       commit('SET_ITEMS', [])
       commit('SET_LOADING', false)
@@ -112,12 +117,21 @@ export const actions = {
       throw error
     }
   },
+  forceSetAll({ commit }, { applications }) {
+    const apps = applications.map((application) =>
+      populateApplication(application, this.$registry)
+    )
+    commit('SET_ITEMS', apps)
+    commit('SET_LOADING', false)
+    commit('SET_LOADED', true)
+    return { applications: apps }
+  },
   /**
    * Clears all the currently selected applications, this could be called when
-   * the group is deleted of when the user logs off.
+   * the workspace is deleted of when the user logs off.
    */
-  clearAll({ commit }, group) {
-    commit('DELETE_ITEMS_FOR_GROUP', group)
+  clearAll({ commit }, workspace) {
+    commit('DELETE_ITEMS_FOR_WORKSPACE', workspace)
     commit('UNSELECT')
     commit('SET_LOADED', false)
   },
@@ -133,12 +147,9 @@ export const actions = {
   },
   /**
    * Creates a new application with the given type and values for the currently
-   * selected group.
+   * selected workspace.
    */
-  async create(
-    { commit, getters, rootGetters, dispatch },
-    { type, group, values }
-  ) {
+  async create({ dispatch }, { type, workspace, values, initWithData = true }) {
     if (Object.prototype.hasOwnProperty.call(values, 'type')) {
       throw new Error(
         'The key "type" is a reserved, but is already set on the ' +
@@ -154,24 +165,31 @@ export const actions = {
 
     const postData = clone(values)
     postData.type = type
+    postData.init_with_data = initWithData
 
     const { data } = await ApplicationService(this.$client).create(
-      group.id,
+      workspace.id,
       postData
     )
-    dispatch('forceCreate', data)
+    return dispatch('forceCreate', data)
   },
   /**
    * Forcefully create an item in the store without making a call to the server.
    */
-  forceCreate({ commit }, data) {
-    populateApplication(data, this.$registry)
-    commit('ADD_ITEM', data)
+  forceCreate({ commit, state, getters }, data) {
+    const app = populateApplication(data, this.$registry)
+    const index = state.items.findIndex((item) => item.id === app.id)
+    if (index === -1) {
+      commit('ADD_ITEM', app)
+    } else {
+      commit('UPDATE_ITEM', { id: app.id, values: app })
+    }
+    return getters.get(app.id)
   },
   /**
    * Updates the values of an existing application.
    */
-  async update({ commit, dispatch, getters }, { application, values }) {
+  async update({ dispatch }, { application, values }) {
     const { data } = await ApplicationService(this.$client).update(
       application.id,
       values
@@ -191,18 +209,22 @@ export const actions = {
   forceUpdate({ commit }, { application, data }) {
     const type = this.$registry.get('application', application.type)
     data = type.prepareForStoreUpdate(application, data)
+
     commit('UPDATE_ITEM', { id: application.id, values: data })
   },
   /**
-   * Updates the order of all the applications in a group.
+   * Updates the order of all the applications in a workspace.
    */
-  async order({ commit, getters }, { group, order, oldOrder }) {
-    commit('ORDER_ITEMS', { group, order })
+  async order(
+    { commit, getters },
+    { workspace, order, oldOrder, isHashed = false }
+  ) {
+    commit('ORDER_ITEMS', { workspace, order, isHashed })
 
     try {
-      await ApplicationService(this.$client).order(group.id, order)
+      await ApplicationService(this.$client).order(workspace.id, order)
     } catch (error) {
-      commit('ORDER_ITEMS', { group, order: oldOrder })
+      commit('ORDER_ITEMS', { workspace, order: oldOrder, isHashed })
       throw error
     }
   },
@@ -225,16 +247,24 @@ export const actions = {
   /**
    * Forcefully delete an item in the store without making a call to the server.
    */
-  forceDelete({ commit }, application) {
+  forceDelete({ commit, dispatch }, application) {
     const type = this.$registry.get('application', application.type)
+    dispatch('job/deleteForApplication', application, { root: true })
     type.delete(application, this)
     commit('DELETE_ITEM', application.id)
   },
   /**
    * Select an application.
    */
-  select({ commit }, application) {
+  select({ commit, dispatch }, application) {
     commit('SET_SELECTED', application)
+    dispatch(
+      'undoRedo/updateCurrentScopeSet',
+      CORE_ACTION_SCOPES.application(application.id),
+      {
+        root: true,
+      }
+    )
     return application
   },
   /**
@@ -248,10 +278,17 @@ export const actions = {
     return dispatch('select', application)
   },
   /**
-   * Unselect the
+   * Unselect the application
    */
-  unselect({ commit }) {
+  unselect({ commit, dispatch }) {
     commit('UNSELECT', {})
+    dispatch(
+      'undoRedo/updateCurrentScopeSet',
+      CORE_ACTION_SCOPES.application(null),
+      {
+        root: true,
+      }
+    )
   },
 }
 
@@ -262,15 +299,21 @@ export const getters = {
   isLoaded(state) {
     return state.loaded
   },
+  isSelected: (state) => (application) => {
+    return state.selected?.id === application.id
+  },
   get: (state) => (id) => {
     return state.items.find((item) => item.id === id)
+  },
+  getSelected: (state) => {
+    return state.selected
   },
   getAll(state) {
     return state.items
   },
-  getAllOfGroup: (state) => (group) => {
+  getAllOfWorkspace: (state) => (workspace) => {
     return state.items.filter(
-      (application) => application.group.id === group.id
+      (application) => application.workspace.id === workspace.id
     )
   },
 }

@@ -1,28 +1,46 @@
+import addPublicAuthTokenHeader from '@baserow/modules/database/utils/publicView'
+
 export default (client) => {
+  const prepareRequestConfig = ({ publicAuthToken = null }) => {
+    const config = { headers: {} }
+    if (publicAuthToken) {
+      addPublicAuthTokenHeader(config, publicAuthToken)
+    }
+    return config
+  }
+
   return {
-    rotateSlug(formId) {
-      return client.post(`/database/views/form/${formId}/rotate-slug/`)
+    getMetaInformation(slug, publicAuthToken = null) {
+      const config = prepareRequestConfig({ publicAuthToken })
+      return client.get(`/database/views/form/${slug}/submit/`, config)
     },
-    getMetaInformation(slug) {
-      return client.get(`/database/views/form/${slug}/submit/`)
+    submit(slug, values, publicAuthToken = null) {
+      const config = prepareRequestConfig({ publicAuthToken })
+      return client.post(`/database/views/form/${slug}/submit/`, values, config)
     },
-    submit(slug, values) {
-      return client.post(`/database/views/form/${slug}/submit/`, values)
-    },
-    linkRowFieldLookup(slug, fieldId, page, search = null) {
+    uploadFile(
+      file,
+      onUploadProgress = function () {},
+      slug,
+      publicAuthToken = null
+    ) {
+      const formData = new FormData()
+      formData.append('file', file)
+
       const config = {
-        params: {
-          page,
-          size: 100,
+        onUploadProgress,
+        headers: {
+          'Content-Type': 'multipart/form-data',
         },
       }
 
-      if (search !== null) {
-        config.params.search = search
+      if (publicAuthToken) {
+        addPublicAuthTokenHeader(config, publicAuthToken)
       }
 
-      return client.get(
-        `/database/views/form/${slug}/link-row-field-lookup/${fieldId}/`,
+      return client.post(
+        `/database/views/form/${slug}/upload-file/`,
+        formData,
         config
       )
     },

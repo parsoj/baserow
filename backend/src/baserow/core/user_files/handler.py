@@ -1,33 +1,65 @@
-import pathlib
+import hashlib
 import mimetypes
-
-from os.path import join
+import os
+import pathlib
+import re
+import secrets
 from io import BytesIO
+from os.path import join
+from typing import Any, Dict, Optional
 from urllib.parse import urlparse
+from zipfile import ZipFile
+
+from django.conf import settings
+from django.core.files.storage import Storage
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db.models import QuerySet
+from django.utils.http import parse_header_parameters
 
 import advocate
 from advocate.exceptions import UnacceptableAddressException
+from loguru import logger
+from PIL import Image, ImageOps
 from requests.exceptions import RequestException
 
-from PIL import Image, ImageOps
-
-from django.conf import settings
-from django.core.files.storage import default_storage
-from django.core.files.uploadedfile import SimpleUploadedFile
-
-from baserow.core.utils import sha256_hash, stream_size, random_string, truncate_middle
+from baserow.core.import_export.utils import file_chunk_generator
+from baserow.core.models import UserFile
+from baserow.core.storage import (
+    ExportZipFile,
+    OverwritingStorageHandler,
+    get_default_storage,
+)
+from baserow.core.utils import random_string, sha256_hash, stream_size, truncate_middle
 
 from .exceptions import (
-    InvalidFileStreamError,
     FileSizeTooLargeError,
     FileURLCouldNotBeReached,
-    MaximumUniqueTriesError,
+    InvalidFileStreamError,
     InvalidFileURLError,
+    MaximumUniqueTriesError,
 )
-from .models import UserFile
+
+MIME_TYPE_UNKNOWN = "application/octet-stream"
 
 
 class UserFileHandler:
+    def get_user_file_by_name(
+        self, user_file_name: str, base_queryset: Optional[QuerySet] = None
+    ) -> UserFile:
+        """
+        Returns the user file with the provided id.
+
+        :param user_file_name: The name of the user file.
+        :param base_queryset: The base queryset that will be used to get the user file.
+        :raises UserFile.DoesNotExist: If the user file does not exist.
+        :return: The user file.
+        """
+
+        if base_queryset is None:
+            base_queryset = UserFile.objects.all()
+
+        return base_queryset.name(user_file_name).get()
+
     def user_file_path(self, user_file_name):
         """
         Generates the full user file path based on the provided file name. This path
@@ -43,6 +75,22 @@ class UserFileHandler:
             user_file_name = user_file_name.name
 
         return join(settings.USER_FILES_DIRECTORY, user_file_name)
+
+    def user_file_sha256(self, user_file_name: str) -> str:
+        """
+        Extracts the sha256 hash from the user file name.
+
+        :param user_file_name: The user file name
+        :return The sha256 hexdigest.
+        :raises ValueError: If the user file name does not contain a sha256 hash
+        """
+
+        sha256_hexdigest = os.path.splitext(user_file_name)[0].rsplit("_", 1)[-1]
+
+        if not re.fullmatch(r"[a-fA-F0-9]{64}", sha256_hexdigest):
+            raise ValueError("Incorrect user file name format.")
+
+        return sha256_hexdigest
 
     def user_file_thumbnail_path(self, user_file_name, thumbnail_name):
         """
@@ -64,7 +112,7 @@ class UserFileHandler:
 
     def generate_unique(self, sha256_hash, extension, length=32, max_tries=1000):
         """
-        Generates a unique non existing string for a new user file.
+        Generates a unique nonexistent string for a new user file.
 
         :param sha256_hash: The hash of the file name. Needed because they are
             required to be unique together.
@@ -99,31 +147,35 @@ class UserFileHandler:
             ).exists():
                 return unique
 
-    def generate_and_save_image_thumbnails(self, image, user_file, storage=None):
+    def generate_and_save_image_thumbnails(
+        self,
+        image: Image,
+        user_file_name: str,
+        storage: Storage | None = None,
+        only_with_name: str | None = None,
+    ):
         """
         Generates the thumbnails based on the current settings and saves them to the
         provided storage. Note that existing files with the same name will be
         overwritten.
 
         :param image: The original Pillow image that serves as base when generating the
-            the image.
-        :type image: Image
-        :param user_file: The user file for which the thumbnails must be generated
-            and saved.
-        :type user_file: UserFile
+            image.
+        :param user_file_name: The name of the user file that the thumbnail is for.
         :param storage: The storage where the thumbnails must be saved to.
-        :type storage: Storage or None
+        :param only_with_name: If provided, then only thumbnail types with that name
+            will be regenerated.
         :raises ValueError: If the provided user file is not a valid image.
         """
 
-        if not user_file.is_image:
-            raise ValueError("The provided user file is not an image.")
-
-        storage = storage or default_storage
-        image_width = user_file.image_width
-        image_height = user_file.image_height
+        storage = storage or get_default_storage()
+        image_width = image.width
+        image_height = image.height
 
         for name, size in settings.USER_THUMBNAILS.items():
+            if only_with_name and only_with_name != name:
+                continue
+
             size_copy = size.copy()
 
             # If the width or height is None we want to keep the aspect ratio.
@@ -132,15 +184,21 @@ class UserFileHandler:
             elif size_copy[1] is None and size_copy[0] is not None:
                 size_copy[1] = round(image_height / image_width * size_copy[0])
 
-            thumbnail = ImageOps.fit(image.copy(), size_copy, Image.ANTIALIAS)
-            thumbnail_stream = BytesIO()
-            thumbnail.save(thumbnail_stream, image.format)
-            thumbnail_stream.seek(0)
-            thumbnail_path = self.user_file_thumbnail_path(user_file, name)
-            storage.save(thumbnail_path, thumbnail_stream)
+            try:
+                thumbnail = ImageOps.fit(image.copy(), size_copy, Image.LANCZOS)
+            except OSError:
+                pass
+            else:
+                thumbnail_stream = BytesIO()
+                thumbnail.save(thumbnail_stream, image.format)
+                thumbnail_stream.seek(0)
+                thumbnail_path = self.user_file_thumbnail_path(user_file_name, name)
 
-            del thumbnail
-            del thumbnail_stream
+                handler = OverwritingStorageHandler(storage)
+                handler.save(thumbnail_path, thumbnail_stream)
+
+                del thumbnail
+                del thumbnail_stream
 
     def upload_user_file(self, user, file_name, stream, storage=None):
         """
@@ -167,68 +225,67 @@ class UserFileHandler:
 
         size = stream_size(stream)
 
-        if size > settings.USER_FILE_SIZE_LIMIT:
+        if size > settings.BASEROW_FILE_UPLOAD_SIZE_LIMIT_MB:
             raise FileSizeTooLargeError(
-                settings.USER_FILE_SIZE_LIMIT, "The provided file is too large."
+                settings.BASEROW_FILE_UPLOAD_SIZE_LIMIT_MB,
+                "The provided file is too large.",
             )
 
-        storage = storage or default_storage
-        hash = sha256_hash(stream)
+        storage = storage or get_default_storage()
+        stream_hash = sha256_hash(stream)
         file_name = truncate_middle(file_name, 64)
 
         existing_user_file = UserFile.objects.filter(
-            original_name=file_name, sha256_hash=hash
+            original_name=file_name, sha256_hash=stream_hash
         ).first()
 
         if existing_user_file:
             return existing_user_file
 
         extension = pathlib.Path(file_name).suffix[1:].lower()
-        mime_type = mimetypes.guess_type(file_name)[0] or ""
-        unique = self.generate_unique(hash, extension)
-
-        # By default the provided file is not an image.
-        image = None
-        is_image = False
-        image_width = None
-        image_height = None
-
-        # Try to open the image with Pillow. If that succeeds we know the file is an
-        # image.
-        try:
-            image = Image.open(stream)
-            is_image = True
-            image_width = image.width
-            image_height = image.height
-        except IOError:
-            pass
-
-        user_file = UserFile.objects.create(
+        mime_type = (
+            mimetypes.guess_type(file_name)[0]
+            or getattr(stream, "content_type", None)
+            or MIME_TYPE_UNKNOWN
+        )
+        unique = self.generate_unique(stream_hash, extension)
+        user_file = UserFile(
             original_name=file_name,
             original_extension=extension,
             size=size,
             mime_type=mime_type,
             unique=unique,
             uploaded_by=user,
-            sha256_hash=hash,
-            is_image=is_image,
-            image_width=image_width,
-            image_height=image_height,
+            sha256_hash=stream_hash,
         )
 
-        # If the uploaded file is an image we need to generate the configurable
-        # thumbnails for it. We want to generate them before the file is saved to the
-        # storage because some storages close the stream after saving.
-        if image:
-            self.generate_and_save_image_thumbnails(image, user_file, storage=storage)
+        image = None
+        try:
+            image = Image.open(stream)
+            user_file.mime_type = f"image/{image.format}".lower()
+            self.generate_and_save_image_thumbnails(
+                image, user_file.name, storage=storage
+            )
+            # Skip marking as images if thumbnails cannot be generated (i.e. PSD files).
+            user_file.is_image = True
+            user_file.image_width = image.width
+            user_file.image_height = image.height
+        except IOError:
+            pass  # Not an image
+        except Exception as exc:
+            logger.warning(
+                f"Failed to generate thumbnails for user file of type {mime_type}: {exc}"
+            )
+        finally:
+            if image is not None:
+                del image
 
-            # When all the thumbnails have been generated, the image can be deleted
-            # from memory.
-            del image
+        user_file.save()
 
         # Save the file to the storage.
         full_path = self.user_file_path(user_file)
-        storage.save(full_path, stream)
+        handler = OverwritingStorageHandler(storage)
+        handler.save(full_path, stream)
 
         # Close the stream because we don't need it anymore.
         stream.close()
@@ -257,8 +314,9 @@ class UserFileHandler:
         if parsed_url.scheme not in ["http", "https"]:
             raise InvalidFileURLError("Only http and https are allowed.")
 
-        file_name = url.split("/")[-1]
-
+        # Pluck out the parsed URL path (in the event we've been given
+        # a URL with a querystring) and then extract the filename.
+        file_name = parsed_url.path.rstrip("/").split("/")[-1]
         try:
             response = advocate.get(url, stream=True, timeout=10)
 
@@ -267,11 +325,127 @@ class UserFileHandler:
                     "The response did not respond with an " "OK status code."
                 )
 
-            content = response.raw.read(
-                settings.USER_FILE_SIZE_LIMIT + 1, decode_content=True
-            )
-        except (RequestException, UnacceptableAddressException):
+            try:
+                content_length = int(response.headers.get("Content-Length", ""))
+                if content_length > settings.BASEROW_FILE_UPLOAD_SIZE_LIMIT_MB:
+                    raise FileSizeTooLargeError(
+                        settings.BASEROW_FILE_UPLOAD_SIZE_LIMIT_MB,
+                        "The provided file is too large.",
+                    )
+            except ValueError:
+                pass
+
+            content = b""
+            for chunk in response.iter_content(chunk_size=None):
+                content += chunk
+                if len(content) > settings.BASEROW_FILE_UPLOAD_SIZE_LIMIT_MB:
+                    response.close()
+                    raise FileSizeTooLargeError(
+                        settings.BASEROW_FILE_UPLOAD_SIZE_LIMIT_MB,
+                        "The provided file is too large.",
+                    )
+            content_type = response.headers.get("Content-Type", "")
+
+        except (RequestException, UnacceptableAddressException, ConnectionError):
             raise FileURLCouldNotBeReached("The provided URL could not be reached.")
 
-        file = SimpleUploadedFile(file_name, content)
-        return UserFileHandler().upload_user_file(user, file_name, file, storage)
+        # content-type may contain extra params, like charset: text/plain; charset=utf-8
+        if content_type:
+            content_type, content_type_params = parse_header_parameters(content_type)
+
+        # validate content_type value, reset to default if it's invalid
+        if not content_type or (
+            content_type and not mimetypes.guess_extension(content_type)
+        ):
+            content_type = MIME_TYPE_UNKNOWN
+
+        # invalid file names which may be parsed from arbitrary url.
+        # we need a replacement file name
+        if file_name == "":
+            ext = mimetypes.guess_extension(content_type) or ".bin"
+            file_name_generator = hashlib.new("sha256")
+            file_name_generator.update(
+                bytes(f"{url} {secrets.token_urlsafe()}", "utf-8")
+            )
+            # generated file name is just a placeholder, we don't need to have full
+            # hexdigest value
+            file_name = f"{file_name_generator.hexdigest()[:12]}{ext}"
+
+        file = SimpleUploadedFile(file_name, content, content_type=content_type)
+        return self.upload_user_file(user, file_name, file, storage)
+
+    def export_user_file(
+        self,
+        user_file: Optional[UserFile],
+        files_zip: Optional[ExportZipFile] = None,
+        storage: Optional[Storage] = None,
+        cache: Dict[str, Any] = None,
+    ) -> Optional[Dict[str, str]]:
+        """
+        Given a UserFile object, write it to files_zip so it can be exported
+        and subsequently imported later.
+        """
+
+        if cache is None:
+            cache = {}
+
+        storage = storage or get_default_storage()
+
+        if not user_file:
+            return None
+
+        name = user_file.name
+
+        # Check if the user file object is already in the cache and if not,
+        # it must be fetched and added to it.
+        cache_entry = f"user_file_{name}"
+        if cache_entry not in cache:
+            namelist = (
+                [item["name"] for item in files_zip.info_list()]
+                if files_zip is not None
+                else []
+            )
+            if files_zip is not None and name not in namelist:
+                # Load the user file from the content and write it to the zip file
+                # because it might not exist in the environment that it is going
+                # to be imported in.
+                file_path = self.user_file_path(name)
+
+                chunk_generator = file_chunk_generator(storage, file_path)
+                files_zip.add(chunk_generator, name)
+
+            # Avoid writing the same file twice
+            cache[cache_entry] = True
+
+        return {"name": name, "original_name": user_file.original_name}
+
+    def import_user_file(
+        self,
+        serialized_user_file: Dict[str, str],
+        files_zip: Optional[ZipFile] = None,
+        storage: Optional[Storage] = None,
+    ) -> Optional[UserFile]:
+        """
+        Given a valid file name and files_zip, re-create the file and return
+        the resulting UserFile object.
+
+        Otherwise, return the existing file from the db.
+        """
+
+        if not serialized_user_file:
+            return None
+
+        if files_zip is None:
+            user_file = self.get_user_file_by_name(serialized_user_file["name"])
+        else:
+            name = serialized_user_file.get("name")
+            original_name = serialized_user_file.get("original_name")
+            if not name or not original_name:
+                return None
+
+            with files_zip.open(name) as stream:
+                user_file = self.upload_user_file(
+                    None, original_name, stream, storage=storage
+                )
+
+        return user_file

@@ -1,4 +1,5 @@
 import { isSecureURL } from '@baserow/modules/core/utils/string'
+import { logoutAndRedirectToLogin } from '@baserow/modules/core/utils/auth'
 
 export class RealTimeHandler {
   constructor(context) {
@@ -6,12 +7,12 @@ export class RealTimeHandler {
     this.socket = null
     this.connected = false
     this.reconnect = false
+    this.anonymous = false
     this.reconnectTimeout = null
     this.attempts = 0
     this.events = {}
-    this.page = null
-    this.pageParameters = {}
-    this.subscribedToPage = true
+    this.pages = []
+    this.subscribedToPages = true
     this.lastToken = null
     this.authenticationSuccess = true
     this.registerCoreEvents()
@@ -21,10 +22,12 @@ export class RealTimeHandler {
    * Creates a new connection with to the web socket so that real time updates can be
    * received.
    */
-  connect(reconnect = true) {
+  connect(reconnect = true, anonymous = false) {
     this.reconnect = reconnect
+    this.anonymous = anonymous
 
-    const token = this.context.store.getters['auth/token']
+    const jwtToken = this.context.store.getters['auth/token']
+    const token = anonymous ? jwtToken || 'anonymous' : jwtToken
 
     // If the user is already connected to the web socket, we don't have to do
     // anything.
@@ -40,7 +43,7 @@ export class RealTimeHandler {
       token === null ||
       (!this.authenticationSuccess && token === this.lastToken)
     ) {
-      this.context.store.dispatch('notification/setFailedConnecting', true)
+      this.context.store.dispatch('toast/setFailedConnecting', true)
       return
     }
 
@@ -48,21 +51,21 @@ export class RealTimeHandler {
 
     // The web socket url is the same as the PUBLIC_BACKEND_URL apart from the
     // protocol.
-    const rawUrl = this.context.app.$env.PUBLIC_BACKEND_URL
+    const rawUrl = this.context.app.$config.PUBLIC_BACKEND_URL
     const url = new URL(rawUrl)
     url.protocol = isSecureURL(rawUrl) ? 'wss:' : 'ws:'
     url.pathname = '/ws/core/'
 
     this.socket = new WebSocket(`${url}?jwt_token=${token}`)
     this.socket.onopen = () => {
-      this.context.store.dispatch('notification/setConnecting', false)
+      this.context.store.dispatch('toast/setConnecting', false)
       this.connected = true
       this.attempts = 0
 
       // If the client needs to be subscribed to a page we can do that directly
       // after connecting.
-      if (!this.subscribedToPage) {
-        this.subscribeToPage()
+      if (!this.subscribedToPages) {
+        this.subscribeToPages()
       }
     }
 
@@ -96,7 +99,7 @@ export class RealTimeHandler {
       this.connected = false
       // By default the user not subscribed to a page a.k.a `null`, so if the current
       // page is already null we can mark it as subscribed.
-      this.subscribedToPage = this.page === null
+      this.subscribedToPages = this.pages.length === 0
       this.delayedReconnect()
     }
   }
@@ -111,11 +114,11 @@ export class RealTimeHandler {
     }
 
     this.attempts++
-    this.context.store.dispatch('notification/setConnecting', true)
+    this.context.store.dispatch('toast/setConnecting', true)
 
     this.reconnectTimeout = setTimeout(
       () => {
-        this.connect(true)
+        this.connect(true, this.anonymous)
       },
       // After the first try, we want to try again every 5 seconds.
       this.attempts > 1 ? 5000 : 0
@@ -128,28 +131,72 @@ export class RealTimeHandler {
    * opens a table page.
    */
   subscribe(page, parameters) {
-    this.page = page
-    this.pageParameters = parameters
-    this.subscribedToPage = false
+    const pageScope = {
+      page,
+      parameters,
+    }
 
-    // If the client is already connected we can directly subscribe to the page.
-    if (this.connected) {
-      this.subscribeToPage()
+    if (
+      !this.pages.some(
+        (elem) => JSON.stringify(elem) === JSON.stringify(pageScope)
+      )
+    ) {
+      this.pages.push(pageScope)
+      // If the client is already connected we can
+      // subscribe to updates for all pages.
+      if (this.connected) {
+        this.subscribeToPage(page, parameters)
+      } else {
+        this.subscribedToPages = false
+      }
     }
   }
 
   /**
-   * Sends a request to the real time server that updates for a certain page +
-   * parameters must be received.
+   * Unsubscribes the client from a given page. The client will
+   * stop receiving updates related to that page.
    */
-  subscribeToPage() {
+  unsubscribe(page, parameters) {
+    this.pages = this.pages.filter(
+      (item) => JSON.stringify(item) !== JSON.stringify({ page, parameters })
+    )
     this.socket.send(
       JSON.stringify({
-        page: this.page === null ? '' : this.page,
-        ...this.pageParameters,
+        remove_page: page,
+        ...parameters,
       })
     )
-    this.subscribedToPage = true
+  }
+
+  /*
+   * Subscribes the client to a new page if the client is
+   * connected.
+   */
+  subscribeToPage(page, parameters) {
+    if (this.connected) {
+      this.socket.send(
+        JSON.stringify({
+          page: page === null ? '' : page,
+          ...parameters,
+        })
+      )
+    }
+  }
+
+  /**
+   * Requests real time updates for the list of pages that
+   * have been collected by the subscribe() call.
+   */
+  subscribeToPages() {
+    if (this.subscribedToPages) {
+      return
+    }
+
+    for (const { page, parameters } of this.pages) {
+      this.subscribeToPage(page, parameters)
+    }
+
+    this.subscribedToPages = true
   }
 
   /**
@@ -161,8 +208,8 @@ export class RealTimeHandler {
       this.socket.close()
     }
 
-    this.context.store.dispatch('notification/setConnecting', false)
-    this.context.store.dispatch('notification/setFailedConnecting', false)
+    this.context.store.dispatch('toast/setConnecting', false)
+    this.context.store.dispatch('toast/setFailedConnecting', false)
     clearTimeout(this.reconnectTimeout)
     this.reconnect = false
     this.attempts = 0
@@ -177,7 +224,7 @@ export class RealTimeHandler {
   }
 
   /**
-   * Registers all the core event handlers, which is for the groups and applications.
+   * Registers all the core event handlers, which is for the workspaces and applications.
    */
   registerCoreEvents() {
     // When the authentication is successful we want to store the web socket id in
@@ -192,27 +239,94 @@ export class RealTimeHandler {
       this.authenticationSuccess = data.success
     })
 
+    this.registerEvent('user_data_updated', ({ store }, data) => {
+      store.dispatch('auth/forceUpdateUserData', data.user_data)
+    })
+
+    this.registerEvent('user_updated', ({ store }, data) => {
+      store.dispatch('workspace/forceUpdateWorkspaceUserAttributes', {
+        userId: data.user.id,
+        values: {
+          name: data.user.first_name,
+        },
+      })
+    })
+
+    this.registerEvent('user_deleted', ({ store }, data) => {
+      store.dispatch('workspace/forceUpdateWorkspaceUserAttributes', {
+        userId: data.user.id,
+        values: {
+          to_be_deleted: true,
+        },
+      })
+    })
+
+    this.registerEvent('user_restored', ({ store }, data) => {
+      store.dispatch('workspace/forceUpdateWorkspaceUserAttributes', {
+        userId: data.user.id,
+        values: {
+          to_be_deleted: false,
+        },
+      })
+    })
+
+    this.registerEvent('user_permanently_deleted', ({ store }, data) => {
+      store.dispatch('workspace/forceDeleteUser', {
+        userId: data.user_id,
+      })
+    })
+
     this.registerEvent('group_created', ({ store }, data) => {
-      store.dispatch('group/forceCreate', data.group)
+      store.dispatch('workspace/forceCreate', data.workspace)
     })
 
     this.registerEvent('group_restored', ({ store }, data) => {
-      store.dispatch('group/forceCreate', data.group)
+      store.dispatch('workspace/forceCreate', data.workspace)
       store.dispatch('application/forceCreateAll', data.applications)
     })
 
     this.registerEvent('group_updated', ({ store }, data) => {
-      const group = store.getters['group/get'](data.group_id)
-      if (group !== undefined) {
-        store.dispatch('group/forceUpdate', { group, values: data.group })
+      const workspace = store.getters['workspace/get'](data.workspace_id)
+      if (workspace !== undefined) {
+        store.dispatch('workspace/forceUpdate', {
+          workspace,
+          values: data.workspace,
+        })
       }
     })
 
     this.registerEvent('group_deleted', ({ store }, data) => {
-      const group = store.getters['group/get'](data.group_id)
-      if (group !== undefined) {
-        store.dispatch('group/forceDelete', group)
+      const workspace = store.getters['workspace/get'](data.workspace_id)
+      if (workspace !== undefined) {
+        store.dispatch('workspace/forceDelete', workspace)
       }
+    })
+
+    this.registerEvent('groups_reordered', ({ store }, data) => {
+      store.dispatch('workspace/forceOrder', data.workspace_ids)
+    })
+
+    this.registerEvent('group_user_added', ({ store }, data) => {
+      store.dispatch('workspace/forceAddWorkspaceUser', {
+        workspaceId: data.workspace_id,
+        values: data.workspace_user,
+      })
+    })
+
+    this.registerEvent('group_user_updated', ({ store }, data) => {
+      store.dispatch('workspace/forceUpdateWorkspaceUser', {
+        id: data.id,
+        workspaceId: data.workspace_id,
+        values: data.workspace_user,
+      })
+    })
+
+    this.registerEvent('group_user_deleted', ({ store }, data) => {
+      store.dispatch('workspace/forceDeleteWorkspaceUser', {
+        id: data.id,
+        workspaceId: data.workspace_id,
+        values: data.workspace_user,
+      })
     })
 
     this.registerEvent('application_created', ({ store }, data) => {
@@ -237,10 +351,69 @@ export class RealTimeHandler {
     })
 
     this.registerEvent('applications_reordered', ({ store }, data) => {
-      const group = store.getters['group/get'](data.group_id)
-      if (group !== undefined) {
-        store.commit('application/ORDER_ITEMS', { group, order: data.order })
+      const workspace = store.getters['workspace/get'](data.workspace_id)
+      if (workspace !== undefined) {
+        store.commit('application/ORDER_ITEMS', {
+          workspace,
+          order: data.order,
+          isHashed: true,
+        })
       }
+    })
+
+    // invitations
+    this.registerEvent(
+      'workspace_invitation_updated_or_created',
+      ({ store }, data) => {
+        store.dispatch(
+          'auth/forceUpdateOrCreateWorkspaceInvitation',
+          data.invitation
+        )
+      }
+    )
+
+    this.registerEvent('workspace_invitation_accepted', ({ store }, data) => {
+      store.dispatch('auth/forceAcceptWorkspaceInvitation', data.invitation)
+    })
+
+    this.registerEvent('workspace_invitation_rejected', ({ store }, data) => {
+      store.dispatch('auth/forceRejectWorkspaceInvitation', data.invitation)
+    })
+
+    // notifications
+    this.registerEvent('notifications_created', ({ store }, data) => {
+      store.dispatch('notification/forceCreateInBulk', {
+        notifications: data.notifications,
+      })
+    })
+
+    this.registerEvent('notifications_fetch_required', ({ store }, data) => {
+      store.dispatch('notification/forceRefetch', {
+        notificationsAdded: data.notifications_added,
+      })
+    })
+
+    this.registerEvent('notification_marked_as_read', ({ store }, data) => {
+      store.dispatch('notification/forceMarkAsRead', {
+        notification: data.notification,
+      })
+    })
+
+    this.registerEvent('all_notifications_marked_as_read', ({ store }) => {
+      store.dispatch('notification/forceMarkAllAsRead')
+    })
+
+    this.registerEvent('all_notifications_cleared', ({ store }) => {
+      store.dispatch('notification/forceClearAll')
+    })
+
+    this.registerEvent('force_disconnect', ({ store }) => {
+      this.reconnect = false
+      logoutAndRedirectToLogin(this.context.app.router, store, false, true)
+    })
+
+    this.registerEvent('job_started', ({ store }, data) => {
+      store.dispatch('job/create', data.job)
     })
   }
 }

@@ -1,27 +1,112 @@
-from django.dispatch import receiver
-from django.db import transaction
+from typing import Any, Dict, List, Optional
 
+from django.db import transaction
+from django.dispatch import receiver
+
+from baserow.contrib.database.api.rows.serializers import (
+    RowHistorySerializer,
+    RowSerializer,
+    get_row_serializer_class,
+    serialize_rows_for_response,
+)
+from baserow.contrib.database.rows import signals as row_signals
+from baserow.contrib.database.rows.registries import row_metadata_registry
+from baserow.contrib.database.table.models import GeneratedTableModel
 from baserow.ws.registries import page_registry
 
-from baserow.contrib.database.rows import signals as row_signals
-from baserow.contrib.database.api.rows.serializers import (
-    get_row_serializer_class,
-    RowSerializer,
-)
+
+@receiver(row_signals.before_rows_update)
+def serialize_rows_values(
+    sender, rows, user, table, model, updated_field_ids, **kwargs
+):
+    return serialize_rows_for_response(rows, model)
 
 
-@receiver(row_signals.row_created)
-def row_created(sender, row, before, user, table, model, **kwargs):
+@receiver(row_signals.rows_created)
+def rows_created(
+    sender,
+    rows,
+    before,
+    user,
+    table,
+    model,
+    send_realtime_update=True,
+    send_webhook_events=True,
+    **kwargs,
+):
+    if not send_realtime_update:
+        return
+
+    table_page_type = page_registry.get("table")
+    transaction.on_commit(
+        lambda: table_page_type.broadcast(
+            RealtimeRowMessages.rows_created(
+                table_id=table.id,
+                serialized_rows=get_row_serializer_class(
+                    model, RowSerializer, is_response=True
+                )(rows, many=True).data,
+                metadata=row_metadata_registry.generate_and_merge_metadata_for_rows(
+                    user, table, [row.id for row in rows]
+                ),
+                before=before,
+            ),
+            getattr(user, "web_socket_id", None),
+            table_id=table.id,
+        )
+    )
+
+
+@receiver(row_signals.rows_updated)
+def rows_updated(
+    sender,
+    rows,
+    user,
+    table,
+    model,
+    before_return,
+    updated_field_ids,
+    send_realtime_update=True,
+    **kwargs,
+):
+    if not send_realtime_update:
+        return
+
+    table_page_type = page_registry.get("table")
+    before_rows_values = dict(before_return)[serialize_rows_values]
+    transaction.on_commit(
+        lambda: table_page_type.broadcast(
+            RealtimeRowMessages.rows_updated(
+                table_id=table.id,
+                serialized_rows_before_update=before_rows_values,
+                serialized_rows=get_row_serializer_class(
+                    model, RowSerializer, is_response=True
+                )(rows, many=True).data,
+                # Broadcast a list of updated fields so that the listener can take
+                # action even if the value didn't change.
+                updated_field_ids=list(updated_field_ids),
+                metadata=row_metadata_registry.generate_and_merge_metadata_for_rows(
+                    user, table, [row.id for row in rows]
+                ),
+            ),
+            getattr(user, "web_socket_id", None),
+            table_id=table.id,
+        )
+    )
+
+
+@receiver(row_signals.rows_ai_values_generation_error)
+def rows_ai_values_generation_error(
+    sender, user, rows, field, table, error_message, **kwargs
+):
     table_page_type = page_registry.get("table")
     transaction.on_commit(
         lambda: table_page_type.broadcast(
             {
-                "type": "row_created",
+                "type": "rows_ai_values_generation_error",
+                "field_id": field.id,
                 "table_id": table.id,
-                "row": get_row_serializer_class(model, RowSerializer, is_response=True)(
-                    row
-                ).data,
-                "before_row_id": before.id if before else None,
+                "row_ids": [row.id for row in rows],
+                "error": error_message,
             },
             getattr(user, "web_socket_id", None),
             table_id=table.id,
@@ -29,58 +114,125 @@ def row_created(sender, row, before, user, table, model, **kwargs):
     )
 
 
-@receiver(row_signals.before_row_update)
-def before_row_update(sender, row, user, table, model, **kwargs):
-    # Generate a serialized version of the row before it is updated. The
-    # `row_updated` receiver needs this serialized version because it can't serialize
-    # the old row after it has been updated.
-    return get_row_serializer_class(model, RowSerializer, is_response=True)(row).data
+@receiver(row_signals.before_rows_delete)
+def before_rows_delete(sender, rows, user, table, model, **kwargs):
+    return get_row_serializer_class(model, RowSerializer, is_response=True)(
+        rows, many=True
+    ).data
 
 
-@receiver(row_signals.row_updated)
-def row_updated(sender, row, user, table, model, before_return, **kwargs):
+@receiver(row_signals.rows_deleted)
+def rows_deleted(
+    sender, rows, user, table, model, before_return, send_realtime_update=True, **kwargs
+):
+    if not send_realtime_update:
+        return
+
     table_page_type = page_registry.get("table")
     transaction.on_commit(
         lambda: table_page_type.broadcast(
-            {
-                "type": "row_updated",
-                "table_id": table.id,
-                # The web-frontend expects a serialized version of the row before it
-                # was updated in order the estimate what position the row had in the
-                # view.
-                "row_before_update": dict(before_return)[before_row_update],
-                "row": get_row_serializer_class(model, RowSerializer, is_response=True)(
-                    row
-                ).data,
-            },
+            RealtimeRowMessages.rows_deleted(
+                table_id=table.id,
+                serialized_rows=dict(before_return)[before_rows_delete],
+            ),
             getattr(user, "web_socket_id", None),
             table_id=table.id,
         )
     )
 
 
-@receiver(row_signals.before_row_delete)
-def before_row_delete(sender, row, user, table, model, **kwargs):
-    # Generate a serialized version of the row before it is deleted. The
-    # `row_deleted` receiver needs this serialized version because it can't serialize
-    # the row after is has been deleted.
-    return get_row_serializer_class(model, RowSerializer, is_response=True)(row).data
-
-
-@receiver(row_signals.row_deleted)
-def row_deleted(sender, row_id, row, user, table, model, before_return, **kwargs):
+@receiver(row_signals.row_orders_recalculated)
+def row_orders_recalculated(sender, table, **kwargs):
     table_page_type = page_registry.get("table")
     transaction.on_commit(
         lambda: table_page_type.broadcast(
-            {
-                "type": "row_deleted",
-                "table_id": table.id,
-                "row_id": row_id,
-                # The web-frontend expects a serialized version of the row that is
-                # deleted in order the estimate what position the row had in the view.
-                "row": dict(before_return)[before_row_delete],
-            },
-            getattr(user, "web_socket_id", None),
+            RealtimeRowMessages.row_orders_recalculated(table_id=table.id),
             table_id=table.id,
         )
     )
+
+
+@receiver(row_signals.rows_history_updated)
+def rows_history_updated(
+    sender,
+    table_id,
+    row_history_entries,
+    **kwargs,
+):
+    row_page_type = page_registry.get("row")
+
+    def send_by_row():
+        for row_history_entry in row_history_entries:
+            serialized_entry = RowHistorySerializer(row_history_entry).data
+            row_page_type.broadcast(
+                {
+                    "type": "row_history_updated",
+                    "row_history_entry": serialized_entry,
+                    "table_id": table_id,
+                    "row_id": row_history_entry.row_id,
+                },
+                table_id=table_id,
+                row_id=row_history_entry.row_id,
+            )
+
+    transaction.on_commit(send_by_row)
+
+
+class RealtimeRowMessages:
+    """
+    A collection of functions which construct the payloads for the realtime
+    websocket messages related to rows.
+    """
+
+    @staticmethod
+    def rows_deleted(
+        table_id: int, serialized_rows: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        return {
+            "type": "rows_deleted",
+            "table_id": table_id,
+            "row_ids": [r["id"] for r in serialized_rows],
+            "rows": serialized_rows,
+        }
+
+    @staticmethod
+    def rows_created(
+        table_id: int,
+        serialized_rows: List[Dict[str, Any]],
+        metadata: Dict[str, Any],
+        before: Optional[GeneratedTableModel],
+    ) -> Dict[str, Any]:
+        return {
+            "type": "rows_created",
+            "table_id": table_id,
+            "rows": serialized_rows,
+            "metadata": metadata,
+            "before_row_id": before.id if before else None,
+        }
+
+    @staticmethod
+    def rows_updated(
+        table_id: int,
+        serialized_rows_before_update: List[Dict[str, Any]],
+        serialized_rows: List[Dict[str, Any]],
+        metadata: Dict[int, Dict[str, Any]],
+        updated_field_ids: List[int],
+    ) -> Dict[str, Any]:
+        return {
+            "type": "rows_updated",
+            "table_id": table_id,
+            # The web-frontend expects a serialized version of the rows before it
+            # was updated in order to estimate what position the row had in the
+            # view.
+            "rows_before_update": serialized_rows_before_update,
+            "rows": serialized_rows,
+            "metadata": metadata,
+            "updated_field_ids": updated_field_ids,
+        }
+
+    @staticmethod
+    def row_orders_recalculated(table_id: int) -> Dict[str, Any]:
+        return {
+            "type": "row_orders_recalculated",
+            "table_id": table_id,
+        }

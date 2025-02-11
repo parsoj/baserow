@@ -80,8 +80,9 @@ class CustomFieldRegistryMappingSerializerExtension(MappingSerializerExtension):
             types.type: types.get_serializer_class(
                 base_class=self.target.base_class,
                 meta_ref_name=(
-                    f"{types.type} {base_ref_name}" if base_ref_name else None
+                    f"{types.type}_{base_ref_name}" if base_ref_name else None
                 ),
+                request_serializer=self.target.request,
             )
             for types in self.target.registry.registry.values()
         }
@@ -163,12 +164,37 @@ class DiscriminatorCustomFieldsMappingSerializerExtension(
     def get_name(self):
         part_1 = self.target.registry.name.title()
         part_2 = self.target.base_class.__name__
-        return f"{part_1}{part_2}"
+        name = f"{part_1}{part_2}"
+
+        if self.target.name_prefix:
+            name = f"{self.target.name_prefix}{name}"
+
+        return name
 
     def map_serializer(self, auto_schema, direction):
-        mapping = {
-            types.type: types.get_serializer_class(base_class=self.target.base_class)
-            for types in self.target.registry.registry.values()
-        }
+        mapping = {}
+
+        for types in self.target.registry.registry.values():
+            name = types.type
+
+            if self.target.name_prefix:
+                name = f"{self.target.name_prefix}{name}"
+
+            mapping[name] = types.get_serializer_class(
+                base_class=self.target.base_class,
+                request_serializer=self.target.request,
+                extra_params=self.target.extra_params,
+            )
 
         return self._map_serializer(auto_schema, direction, mapping)
+
+
+class PolymorphicMappingSerializerExtensionMixin(
+    DiscriminatorCustomFieldsMappingSerializerExtension
+):
+    """
+    Extension to correctly display Polymorphic serializer documentation.
+    """
+
+    target_class = "baserow.api.polymorphic.PolymorphicSerializer"
+    match_subclasses = True

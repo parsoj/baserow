@@ -7,11 +7,12 @@ export class APITokenSettingsType extends SettingsType {
   }
 
   getIconClass() {
-    return 'key'
+    return 'iconoir-key-alt-plus'
   }
 
   getName() {
-    return 'API Tokens'
+    const { i18n } = this.app
+    return i18n.t('settingType.tokens')
   }
 
   getComponent() {

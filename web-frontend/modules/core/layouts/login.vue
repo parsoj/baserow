@@ -1,20 +1,24 @@
 <template>
   <div>
-    <Notifications></Notifications>
-    <div class="box-page__header"></div>
-    <div class="box-page">
-      <div class="box">
-        <nuxt />
-      </div>
+    <Toasts></Toasts>
+    <div class="auth__container">
+      <nuxt />
     </div>
   </div>
 </template>
 
 <script>
-import Notifications from '@baserow/modules/core/components/notifications/Notifications'
+import Toasts from '@baserow/modules/core/components/toasts/Toasts'
 
 export default {
-  components: { Notifications },
-  middleware: ['settings'],
+  components: { Toasts },
+  middleware: ['settings', 'urlCheck'],
+  head() {
+    return {
+      bodyAttrs: {
+        class: 'auth__body',
+      },
+    }
+  },
 }
 </script>

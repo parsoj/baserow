@@ -1,137 +1,121 @@
 <template>
-  <Modal>
-    <h2 class="box__title">Create new table</h2>
-    <Error :error="error"></Error>
-    <TableForm ref="tableForm" @submitted="submitted">
-      <div class="control">
-        <label class="control__label">
-          Would you like to import existing data?
-        </label>
-        <div class="control__elements">
-          <ul class="choice-items">
+  <Modal @show="setChosenType('')" @hidden="callCreateComponentHide()">
+    <template #content>
+      <div class="import-modal__header">
+        <h2 class="import-modal__title">
+          {{ $t('createTableModal.title') }}
+        </h2>
+      </div>
+
+      <div class="control margin-bottom-2">
+        <FormGroup
+          :label="$t('createTableModal.importLabel')"
+          small-label
+          required
+        >
+          <ul class="choice-items margin-top-1">
             <li>
               <a
                 class="choice-items__link"
-                :class="{ active: importer === '' }"
-                @click="importer = ''"
+                :class="{ active: chosenType === '' }"
+                @click="setChosenType('')"
               >
-                <i class="choice-items__icon fas fa-clone"></i>
-                Start with a new table
+                <i class="choice-items__icon iconoir-copy"></i>
+                <span>{{ $t('createTableModal.newTable') }}</span>
+                <i
+                  v-if="chosenType === ''"
+                  class="choice-items__icon-active iconoir-check-circle"
+                ></i>
               </a>
             </li>
-            <li v-for="importerType in importerTypes" :key="importerType.type">
+            <li v-for="instance in importerTypes" :key="instance.type">
               <a
                 class="choice-items__link"
-                :class="{ active: importer === importerType.type }"
-                @click="importer = importerType.type"
+                :class="{ active: chosenType === instance.type }"
+                @click="setChosenType(instance.type)"
               >
+                <i class="choice-items__icon" :class="instance.iconClass"></i>
+                <span> {{ instance.getName() }}</span>
                 <i
-                  class="choice-items__icon fas"
-                  :class="'fa-' + importerType.iconClass"
+                  v-if="chosenType === instance.type"
+                  class="choice-items__icon-active iconoir-check-circle"
                 ></i>
-                {{ importerType.name }}
               </a>
             </li>
+            <DataSyncTypeChoice
+              v-for="instance in dataSyncTypes"
+              :key="instance.type"
+              :active="chosenType === instance.type"
+              :data-sync-type="instance"
+              :database="database"
+              @selected="setChosenType(instance.type)"
+            ></DataSyncTypeChoice>
           </ul>
-        </div>
+        </FormGroup>
       </div>
-      <component :is="importerComponent" />
-      <div class="actions">
-        <div class="align-right">
-          <button
-            class="button button--large"
-            :class="{ 'button--loading': loading }"
-            :disabled="loading"
-          >
-            Add table
-          </button>
-        </div>
-      </div>
-    </TableForm>
+
+      <CreateTable
+        v-if="isImporter"
+        ref="createComponent"
+        :chosen-type="chosenType"
+        :database="database"
+        @hide="hide()"
+      ></CreateTable>
+      <CreateDataSync
+        v-else
+        ref="createComponent"
+        :chosen-type="chosenType"
+        :database="database"
+        @hide="hide()"
+      ></CreateDataSync>
+    </template>
   </Modal>
 </template>
 
 <script>
 import modal from '@baserow/modules/core/mixins/modal'
-import error from '@baserow/modules/core/mixins/error'
-
-import TableForm from './TableForm'
+import CreateTable from '@baserow/modules/database/components/table/CreateTable'
+import CreateDataSync from '@baserow/modules/database/components/table/CreateDataSync'
+import DataSyncTypeChoice from '@baserow/modules/database/components/dataSync/DataSyncTypeChoice.vue'
 
 export default {
   name: 'CreateTableModal',
-  components: { TableForm },
-  mixins: [modal, error],
+  components: { DataSyncTypeChoice, CreateTable, CreateDataSync },
+  mixins: [modal],
   props: {
-    application: {
+    database: {
       type: Object,
       required: true,
     },
   },
   data() {
     return {
-      loading: false,
-      importer: '',
+      chosenType: '',
     }
   },
   computed: {
     importerTypes() {
       return this.$registry.getAll('importer')
     },
-    importerComponent() {
-      return this.importer === ''
-        ? null
-        : this.$registry.get('importer', this.importer).getFormComponent()
+    dataSyncTypes() {
+      return this.$registry.getAll('dataSync')
+    },
+    isImporter() {
+      return (
+        this.chosenType === '' ||
+        this.$registry.exists('importer', this.chosenType)
+      )
     },
   },
   methods: {
-    hide(...args) {
-      modal.methods.hide.call(this, ...args)
-      this.importer = ''
+    callCreateComponentHide() {
+      this.$refs.createComponent.hide()
     },
-    /**
-     * When the form is submitted we try to extract the initial data and first row
-     * header setting from the values. An importer could have added those, but they
-     * need to be removed from the values.
-     */
-    async submitted(values) {
-      this.loading = true
-      this.hideError()
-
-      let firstRowHeader = false
-      let data = null
-
-      if (Object.prototype.hasOwnProperty.call(values, 'firstRowHeader')) {
-        firstRowHeader = values.firstRowHeader
-        delete values.firstRowHeader
+    setChosenType(type) {
+      if (type === this.chosenType && type !== '') {
+        return
       }
-
-      if (Object.prototype.hasOwnProperty.call(values, 'data')) {
-        data = JSON.parse(values.data)
-        delete values.data
-      }
-
-      try {
-        const table = await this.$store.dispatch('table/create', {
-          database: this.application,
-          values,
-          initialData: data,
-          firstRowHeader,
-        })
-        this.loading = false
-        this.hide()
-
-        // Redirect to the newly created table.
-        this.$nuxt.$router.push({
-          name: 'database-table',
-          params: {
-            databaseId: this.application.id,
-            tableId: table.id,
-          },
-        })
-      } catch (error) {
-        this.loading = false
-        this.handleError(error, 'application')
-      }
+      this.chosenType = type
     },
   },
 }

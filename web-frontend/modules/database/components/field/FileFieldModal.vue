@@ -3,7 +3,7 @@
     v-if="open"
     ref="modalWrapper"
     class="modal__wrapper file-field-modal__wrapper"
-    @click="outside($event)"
+    @mousedown="outside($event)"
   >
     <div class="file-field-modal">
       <div class="file-field-modal__head">
@@ -27,12 +27,12 @@
               class="file-field-modal__rename"
               @click="$refs.rename.edit()"
             >
-              <i class="fa fa-pen"></i>
+              <i class="iconoir-edit-pencil"></i>
             </a>
           </template>
         </div>
         <a class="file-field-modal__close" @click="hide()">
-          <i class="fas fa-times"></i>
+          <i class="iconoir-cancel"></i>
         </a>
       </div>
       <div class="file-field-modal__body">
@@ -40,23 +40,26 @@
           class="file-field-modal__body-nav file-field-modal__body-nav--previous"
           @click="previous()"
         >
-          <i class="fas fa-chevron-left"></i>
+          <i class="iconoir-nav-arrow-left"></i>
         </a>
         <a
           class="file-field-modal__body-nav file-field-modal__body-nav--next"
           @click="next()"
         >
-          <i class="fas fa-chevron-right"></i>
+          <i class="iconoir-nav-arrow-right"></i>
         </a>
         <div v-if="preview !== null" class="file-field-modal__preview">
-          <FileFieldModalImage
-            v-if="preview.is_image"
-            :key="preview.name + '-' + selected"
-            :src="preview.url"
-          ></FileFieldModalImage>
-          <div v-else class="file-field-modal__preview-icon">
-            <i class="fas" :class="'fa-' + getIconClass(preview.mime_type)"></i>
-          </div>
+          <PreviewAny
+            ref="modalPreview"
+            :mime-type="preview.mime_type"
+            :url="preview.url"
+          >
+            <template #fallback>
+              <div class="file-field-modal__preview-icon">
+                <i :class="getIconClass(preview.mime_type)"></i>
+              </div>
+            </template>
+          </PreviewAny>
         </div>
       </div>
       <div class="file-field-modal__foot">
@@ -78,26 +81,29 @@
               />
               <i
                 v-else
-                class="fas file-field-modal__nav-icon"
-                :class="'fa-' + getIconClass(file.mime_type)"
+                class="file-field-modal__nav-icon"
+                :class="getIconClass(file.mime_type)"
               ></i>
             </a>
           </li>
         </ul>
         <ul v-if="preview" class="file-field-modal__actions">
-          <a
-            target="_blank"
-            :href="preview.url"
+          <DownloadLink
             class="file-field-modal__action"
+            :url="preview.url"
+            :filename="preview.visible_name"
+            :loading-class="'file-field-modal__action--loading'"
           >
-            <i class="fas fa-download"></i>
-          </a>
+            <template #default="{ loading }">
+              <i v-if="!loading" class="iconoir-download" />
+            </template>
+          </DownloadLink>
           <a
             v-if="!readOnly"
             class="file-field-modal__action"
             @click="remove(selected)"
           >
-            <i class="fas fa-trash"></i>
+            <i class="iconoir-bin"></i>
           </a>
         </ul>
       </div>
@@ -107,12 +113,18 @@
 
 <script>
 import baseModal from '@baserow/modules/core/mixins/baseModal'
-import { mimetype2fa } from '@baserow/modules/core/utils/fontawesome'
-import FileFieldModalImage from '@baserow/modules/database/components/field/FileFieldModalImage'
+import { mimetype2icon } from '@baserow/modules/core/utils/fileTypeToIcon'
+import PreviewAny from '@baserow/modules/database/components/preview/PreviewAny'
+import {
+  isElement,
+  doesAncestorMatchPredicate,
+} from '@baserow/modules/core/utils/dom'
 
 export default {
   name: 'FileFieldModal',
-  components: { FileFieldModalImage },
+  components: {
+    PreviewAny,
+  },
   mixins: [baseModal],
   props: {
     files: {
@@ -141,10 +153,11 @@ export default {
   methods: {
     show(index = 0) {
       this.selected = index
+      this.renaming = false
       return baseModal.methods.show.call(this)
     },
     getIconClass(mimeType) {
-      return mimetype2fa(mimeType)
+      return mimetype2icon(mimeType)
     },
     next() {
       this.selected =
@@ -174,14 +187,33 @@ export default {
       }
 
       // If left arrow
-      if (event.keyCode === 37) {
+      if (event.key === 'ArrowLeft') {
         this.previous()
       }
       // If right arrow
-      if (event.keyCode === 39) {
+      if (event.key === 'ArrowRight') {
         this.next()
       }
       return baseModal.methods.keyup.call(this, event)
+    },
+    outside(event) {
+      const isChildOfAnchor = () =>
+        doesAncestorMatchPredicate(
+          event.target,
+          (el) => el.tagName === 'A',
+          this.$el
+        )
+
+      const protectedElements = [
+        this.$refs.rename.$el,
+        ...this.$refs.modalPreview.$el.children,
+      ]
+      const isProtectedElement = () =>
+        protectedElements.some((element) => isElement(element, event.target))
+
+      if (!this.renaming && !isProtectedElement() && !isChildOfAnchor()) {
+        this.hide()
+      }
     },
   },
 }

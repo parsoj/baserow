@@ -1,39 +1,17 @@
 <template>
   <div>
-    <h2 class="box__title">Upload from my device</h2>
-    <input
-      v-show="false"
-      ref="file"
-      type="file"
-      multiple
-      @change="addFile($event)"
+    <h2 class="box__title">{{ $t('uploadFileUserFileUpload.title') }}</h2>
+    <UploadFileDropzone
+      v-if="showDropZone"
+      :multiple-files="multipleFiles"
+      :file-types-acceptable="fileTypesAcceptable"
+      @input="addFile($event)"
     />
-    <div
-      class="upload-files__dropzone"
-      :class="{ 'upload-files__dropzone--dragging': dragging }"
-      @click.prevent="$refs.file.click($event)"
-      @drop.prevent="addFile($event)"
-      @dragover.prevent
-      @dragenter.prevent="dragging = true"
-      @dragleave.prevent="dragging = false"
-    >
-      <div class="upload-files__dropzone-content">
-        <i class="upload-files__dropzone-icon fas fa-cloud-upload-alt"></i>
-        <div class="upload-files__dropzone-text">
-          <template v-if="dragging"> Drop here </template>
-          <template v-else> Click or drop your files here </template>
-        </div>
-      </div>
-    </div>
     <ul v-show="files.length > 0" class="upload-files__list">
       <li v-for="file in files" :key="file.id" class="upload-files__item">
         <div class="upload-files__preview">
           <div class="upload-files__icon">
-            <i
-              v-if="!file.isImage"
-              class="fas"
-              :class="'fa-' + file.iconClass"
-            ></i>
+            <i v-if="!file.isImage" :class="file.iconClass"></i>
             <img v-if="file.isImage" :ref="'file-image-' + file.id" />
           </div>
         </div>
@@ -46,24 +24,17 @@
             {{ file.error }}
           </div>
           <div v-else class="upload-files__progress">
-            <div
-              class="upload-files__progress-bar"
-              :class="{
-                'upload-files__progress-bar--finished':
-                  file.state === 'finished',
-              }"
-              :style="{ width: file.percentage + '%' }"
-            ></div>
+            <ProgressBar :value="file.percentage" :show-value="false" />
           </div>
         </div>
         <div class="upload-files__state">
           <i
             v-show="file.state === 'finished'"
-            class="upload-files__state-waiting fas fa-check"
+            class="upload-files__state-waiting iconoir-check"
           ></i>
           <i
             v-show="file.state === 'failed'"
-            class="upload-files__state-failed fas fa-times"
+            class="upload-files__state-failed iconoir-cancel"
           ></i>
           <div
             v-show="file.state === 'uploading'"
@@ -72,39 +43,61 @@
           <a
             v-show="file.state === 'waiting'"
             class="upload-files__state-link"
-            @click.prevent="removeFile(file.id)"
+            @click.stop.prevent="removeFile(file.id)"
           >
-            <i class="fas fa-trash"></i>
+            <i class="iconoir-bin"></i>
           </a>
         </div>
       </li>
     </ul>
     <div v-show="files.length > 0" class="align-right">
-      <a
-        class="button button--large"
-        :class="{ 'button--loading': uploading }"
-        :disabled="uploading"
+      <Button
+        type="primary"
+        size="large"
+        :loading="uploading"
+        :disable="uploading"
         @click="upload()"
       >
-        <template v-if="!uploading && hasFailed">Retry</template>
-        <template v-else>Upload</template>
-      </a>
+        <template v-if="!uploading && hasFailed">{{
+          $t('uploadFileUserFileUpload.retry')
+        }}</template>
+        <template v-else>{{ $t('action.upload') }}</template>
+      </Button>
     </div>
   </div>
 </template>
 
 <script>
 import { uuid } from '@baserow/modules/core/utils/string'
-import { mimetype2fa } from '@baserow/modules/core/utils/fontawesome'
+import { mimetype2icon } from '@baserow/modules/core/utils/fileTypeToIcon'
 import { generateThumbnail } from '@baserow/modules/core/utils/image'
 import UserFileService from '@baserow/modules/core/services/userFile'
-
+import UploadFileDropzone from '@baserow/modules/core/components/files/UploadFileDropzone'
+import { getFilesFromEvent } from '@baserow/modules/core/utils/file'
+import { IMAGE_FILE_TYPES } from '@baserow/modules/core/enums'
 export default {
   name: 'UploadFileUserFileUpload',
+  components: { UploadFileDropzone },
+  props: {
+    uploadFile: {
+      type: Function,
+      required: false,
+      default: null,
+    },
+    multipleFiles: {
+      type: Boolean,
+      required: false,
+      default: true,
+    },
+    fileTypesAcceptable: {
+      type: Array,
+      required: false,
+      default: null,
+    },
+  },
   data() {
     return {
       uploading: false,
-      dragging: false,
       files: [],
       responses: [],
     }
@@ -118,6 +111,18 @@ export default {
       }
       return false
     },
+    /**
+     * If no uploadFile is given, we use the default uploadFile function.
+     */
+    uploadFileFunction() {
+      return this.uploadFile || UserFileService(this.$client).uploadFile
+    },
+    showDropZone() {
+      if (this.multipleFiles) {
+        return true
+      }
+      return this.files.length === 0
+    },
   },
   methods: {
     /**
@@ -125,32 +130,20 @@ export default {
      * drop event, but also via a file upload input event.
      */
     addFile(event) {
-      this.dragging = false
+      const files = getFilesFromEvent(event)
 
-      let files = null
-
-      if (event.target.files) {
-        // Files via the file upload input.
-        files = event.target.files
-      } else if (event.dataTransfer) {
-        // Files via drag and drop.
-        files = event.dataTransfer.files
-      }
-
-      if (files === null) {
+      if (files.length === 0) {
         return
       }
 
-      const imageTypes = ['image/jpeg', 'image/jpg', 'image/png']
-
       Array.from(files).forEach((file) => {
-        const isImage = imageTypes.includes(file.type)
+        const isImage = IMAGE_FILE_TYPES.includes(file.type)
         const item = {
           id: uuid(),
           percentage: 0,
           error: null,
           state: 'waiting',
-          iconClass: mimetype2fa(file.type),
+          iconClass: mimetype2icon(file.type),
           isImage,
           file,
         }
@@ -231,10 +224,7 @@ export default {
       file.state = 'uploading'
 
       try {
-        const { data } = await UserFileService(this.$client).uploadFile(
-          file.file,
-          progress
-        )
+        const { data } = await this.uploadFileFunction(file.file, progress)
         this.responses.push(data)
         file.state = 'finished'
       } catch (error) {

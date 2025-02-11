@@ -1,15 +1,18 @@
 import { Registerable } from '@baserow/modules/core/registry'
 import PasswordSettings from '@baserow/modules/core/components/settings/PasswordSettings'
+import AccountSettings from '@baserow/modules/core/components/settings/AccountSettings'
+import DeleteAccountSettings from '@baserow/modules/core/components/settings/DeleteAccountSettings'
+import EmailNotifications from '@baserow/modules/core/components/settings/EmailNotifications'
 
 /**
  * All settings types will be added to the settings modal.
  */
 export class SettingsType extends Registerable {
   /**
-   * The font awesome 5 icon name that is used as convenience for the user to
+   * The icon class name that is used as convenience for the user to
    * recognize setting types. The icon will for example be displayed in the modal
    * setting sidebar. If you for example want the database icon, you must return
-   * 'database' here. This will result in the classname 'fas fa-database'.
+   * 'database' here. This will result in the classname 'iconoir-database'.
    */
   getIconClass() {
     return null
@@ -31,11 +34,14 @@ export class SettingsType extends Registerable {
     throw new Error('The component of a settings type must be set.')
   }
 
-  constructor() {
-    super()
+  isEnabled() {
+    return true
+  }
+
+  constructor(...args) {
+    super(...args)
     this.type = this.getType()
     this.iconClass = this.getIconClass()
-    this.name = this.getName()
 
     if (this.type === null) {
       throw new Error('The type name of a settings type must be set.')
@@ -55,8 +61,31 @@ export class SettingsType extends Registerable {
     return {
       type: this.type,
       iconClass: this.iconClass,
-      name: this.name,
+      name: this.getName(),
     }
+  }
+
+  getOrder() {
+    return 50
+  }
+}
+
+export class AccountSettingsType extends SettingsType {
+  static getType() {
+    return 'account'
+  }
+
+  getIconClass() {
+    return 'iconoir-user'
+  }
+
+  getName() {
+    const { i18n } = this.app
+    return i18n.t('settingType.account')
+  }
+
+  getComponent() {
+    return AccountSettings
   }
 }
 
@@ -66,14 +95,64 @@ export class PasswordSettingsType extends SettingsType {
   }
 
   getIconClass() {
-    return 'lock'
+    return 'iconoir-lock'
   }
 
   getName() {
-    return 'Password'
+    const { i18n } = this.app
+    return i18n.t('settingType.password')
+  }
+
+  isEnabled() {
+    return (
+      this.app.store.getters['authProvider/getPasswordLoginEnabled'] ||
+      this.app.store.getters['auth/isStaff']
+    )
   }
 
   getComponent() {
     return PasswordSettings
+  }
+}
+
+export class EmailNotificationsSettingsType extends SettingsType {
+  static getType() {
+    return 'email-notifications'
+  }
+
+  getIconClass() {
+    return 'iconoir-mail'
+  }
+
+  getName() {
+    const { i18n } = this.app
+    return i18n.t('settingType.emailNotifications')
+  }
+
+  getComponent() {
+    return EmailNotifications
+  }
+}
+
+export class DeleteAccountSettingsType extends SettingsType {
+  static getType() {
+    return 'delete-account'
+  }
+
+  getIconClass() {
+    return 'iconoir-cancel'
+  }
+
+  getName() {
+    const { i18n } = this.app
+    return i18n.t('settingType.deleteAccount')
+  }
+
+  getComponent() {
+    return DeleteAccountSettings
+  }
+
+  getOrder() {
+    return 60
   }
 }

@@ -1,12 +1,13 @@
-from baserow.core.registry import Instance, Registry
+from typing import Optional
 
+from baserow.core.registry import Instance, Registry
 from baserow.ws.tasks import broadcast_to_channel_group
 
 
 class PageType(Instance):
     """
     The page registry holds the pages where the users can subscribe/add himself to.
-    When added he will receive real time updates related to that page.
+    When added they will receive real time updates related to that page.
 
     A user can subscribe by sending a message to the server containing the type as
     page name and the additional parameters. Example:
@@ -61,7 +62,25 @@ class PageType(Instance):
             "Each web socket page must have his own get_group_name method."
         )
 
-    def broadcast(self, payload, ignore_web_socket_id=None, **kwargs):
+    def get_permission_channel_group_name(self, **kwargs) -> Optional[str]:
+        """
+        The generated name will be used by the core consumer to add the connected
+        client to a permission channel group so that the consumer can then listen
+        to permission changes and unsubscribe itself from channel groups where
+        permissions have been revoked.
+
+        The permission channel group is optional and so None can be returned which
+        will not add the consumer subscribing to the page to any permission groups.
+
+        :param kwargs: The additional parameters including their provided values.
+        :return: The permission group name relevant to the page.
+        """
+
+        return None
+
+    def broadcast(
+        self, payload, ignore_web_socket_id=None, exclude_user_ids=None, **kwargs
+    ):
         """
         Broadcasts a payload to everyone within the group.
 
@@ -70,13 +89,19 @@ class PageType(Instance):
         :type payload:  dict
         :param ignore_web_socket_id: If provided then the payload will not be broad
             casted to that web socket id. This is often the sender.
-        :type ignore_web_socket_id: str
+        :type ignore_web_socket_id: Optional[str]
+        :param exclude_user_ids: A list of User ids which should be excluded from
+            receiving the message.
+        :type exclude_user_ids: Optional[list]
         :param kwargs: The additional parameters including their provided values.
         :type kwargs: dict
         """
 
         broadcast_to_channel_group.delay(
-            self.get_group_name(**kwargs), payload, ignore_web_socket_id
+            self.get_group_name(**kwargs),
+            payload,
+            ignore_web_socket_id,
+            exclude_user_ids,
         )
 
 

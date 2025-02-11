@@ -1,10 +1,10 @@
 # Application type
 
-An application is an abstraction that a user can add to group. More information about 
-this can be found in the [introduction](../getting-started/introduction.md). This is a
+An application is an abstraction that a user can add to workspace. More information about 
+this can be found in the [introduction](../technical/introduction.md). This is a
 tutorial about how you can add your own application to Baserow via a plugin. We are 
 going to create a text file application. In the end a user can use the "Create new" 
-button to create a text file and add it to a group. We expect that you are using the
+button to create a text file and add it to a workspace. We expect that you are using the
 [plugin boilerplate](./boilerplate.md).
 
 ## Backend
@@ -66,7 +66,7 @@ $ baserow migrate
 
 Lets try to create a new application with the `text_file` type by calling the 
 `create_application` endpoint. More information on how to do this can be found in the
-[api docs](../getting-started/api.md) and in the 
+[api docs](../apis/rest-api.md) and in the 
 [create application api spec](https://api.baserow.io/api/redoc/#operation/create_application).
 If that succeeds you are ready to get to the next web-frontend part. You might want to 
 inspect the `backend/src/baserow/core/registries.py::ApplicationType` class for all the
@@ -89,7 +89,7 @@ export class TextFileApplicationType extends ApplicationType {
   }
 
   getIconClass() {
-    return 'file-alt'
+    return 'iconoir-file-alt'
   }
 
   getName() {
@@ -107,9 +107,10 @@ plugins/my_baserow_plugin/web-frontend/plugin.js
 import { PluginNamePlugin } from '@my-baserow-plugin/plugins'
 import { TextFileApplicationType } from '@my-baserow-plugin/applicationTypes'
 
-export default ({ store, app }) => {
-  app.$registry.register('plugin', new PluginNamePlugin())
-  app.$registry.register('application', new TextFileApplicationType())
+export default (context) => {
+  const { app } = context
+  app.$registry.register('plugin', new PluginNamePlugin(context))
+  app.$registry.register('application', new TextFileApplicationType(context))
 }
 ```
 

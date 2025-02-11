@@ -1,8 +1,10 @@
 <template>
-  <Modal :sidebar="true" @hidden="$emit('hidden')">
+  <Modal :left-sidebar="true" @hidden="$emit('hidden')">
     <template #sidebar>
       <div class="modal-sidebar__head">
-        <div class="modal-sidebar__head-name">Upload from</div>
+        <div class="modal-sidebar__head-name">
+          {{ $t('userFilesModal.title') }}
+        </div>
       </div>
       <ul class="modal-sidebar__nav">
         <li v-for="upload in registeredUserFileUploads" :key="upload.type">
@@ -11,11 +13,8 @@
             :class="{ active: page === upload.type }"
             @click="setPage(upload.type)"
           >
-            <i
-              class="fas modal-sidebar__nav-icon"
-              :class="'fa-' + upload.iconClass"
-            ></i>
-            {{ upload.name }}
+            <i class="modal-sidebar__nav-icon" :class="upload.iconClass"></i>
+            {{ upload.getName() }}
           </a>
         </li>
       </ul>
@@ -23,6 +22,9 @@
     <template #content>
       <component
         :is="userFileUploadComponent"
+        :upload-file="uploadFile"
+        :multiple-files="multipleFiles"
+        :file-types-acceptable="fileTypesAcceptable"
         @uploaded="$emit('uploaded', $event)"
       ></component>
     </template>
@@ -35,6 +37,28 @@ import modal from '@baserow/modules/core/mixins/modal'
 export default {
   name: 'UserFilesModal',
   mixins: [modal],
+  props: {
+    uploadFile: {
+      type: Function,
+      required: false,
+      default: null,
+    },
+    userFileUploadTypes: {
+      type: Array,
+      required: false,
+      default: null,
+    },
+    multipleFiles: {
+      type: Boolean,
+      required: false,
+      default: true,
+    },
+    fileTypesAcceptable: {
+      type: Array,
+      required: false,
+      default: null,
+    },
+  },
   data() {
     return {
       page: null,
@@ -42,7 +66,18 @@ export default {
   },
   computed: {
     registeredUserFileUploads() {
-      return this.$registry.getAll('userFileUpload')
+      const uploadTypes = this.$registry.getAll('userFileUpload')
+      // The `userFileUploadTypes` contains an array of allowed upload types. If not
+      // `null`, we need to remove the ones that are not allowed from `uploadTypes`
+      // because that one contains all the available upload files.
+      if (this.userFileUploadTypes !== null) {
+        Object.keys(uploadTypes).forEach((typeName) => {
+          if (!this.userFileUploadTypes.includes(typeName)) {
+            delete uploadTypes[typeName]
+          }
+        })
+      }
+      return uploadTypes
     },
     userFileUploadComponent() {
       const active = Object.values(

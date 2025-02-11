@@ -1,67 +1,170 @@
 <template>
-  <div class="grid-view__cell grid-field-link-row__cell active">
-    <div class="grid-field-link-row__list">
-      <div
+  <div class="grid-view__cell grid-field-many-to-many__cell active">
+    <div class="grid-field-many-to-many__list">
+      <component
+        :is="publicGrid || !canAccessLinkedTable ? 'span' : 'a'"
         v-for="item in value"
         :key="item.id"
-        class="grid-field-link-row__item"
+        class="grid-field-many-to-many__item"
+        @click.prevent="showForeignRowModal(item)"
       >
         <span
-          class="grid-field-link-row__name"
+          class="grid-field-many-to-many__name"
           :class="{
-            'grid-field-link-row__name--unnamed':
+            'grid-field-link-row__unnamed':
               item.value === null || item.value === '',
           }"
+          :title="item.value"
         >
-          {{ item.value || 'unnamed row ' + item.id }}
+          {{
+            item.value || $t('gridViewFieldLinkRow.unnamed', { value: item.id })
+          }}
         </span>
+        <span
+          v-if="itemLoadingId === item.id"
+          class="grid-field-many-to-many__loading"
+        ></span>
         <a
-          v-if="!readOnly"
-          class="grid-field-link-row__remove"
-          @click.prevent="removeValue($event, value, item.id)"
+          v-else-if="canAccessLinkedTable"
+          class="grid-field-many-to-many__remove"
+          @click.prevent.stop="removeValue($event, value, item.id)"
         >
-          <i class="fas fa-times"></i>
+          <i class="iconoir-cancel"></i>
         </a>
-      </div>
+      </component>
       <a
-        v-if="!readOnly"
-        class="grid-field-link-row__item grid-field-link-row__item--link"
+        v-if="canAccessLinkedTable"
+        class="grid-field-many-to-many__item grid-field-many-to-many__item--link"
         @click.prevent="showModal()"
       >
-        <i class="fas fa-plus"></i>
+        <i class="iconoir-plus"></i>
       </a>
     </div>
     <SelectRowModal
+      v-if="canAccessLinkedTable"
       ref="selectModal"
-      :table-id="field.link_row_table"
+      :table-id="field.link_row_table_id"
+      :new-row-presets="presetsForNewRowInLinkedTable"
+      :view-id="field.link_row_limit_selection_view_id"
       :value="value"
+      :multiple="true"
+      :persistent-field-options-key="getPersistentFieldOptionsKey(field.id)"
       @selected="addValue(value, $event)"
+      @unselected="removeValue({}, value, $event.row.id)"
       @hidden="hideModal"
     ></SelectRowModal>
+    <ForeignRowEditModal
+      v-if="canAccessLinkedTable"
+      ref="rowEditModal"
+      :table-id="field.link_row_table_id"
+      :fields-sortable="false"
+      :can-modify-fields="false"
+      :read-only="readOnly"
+      @hidden="hideModal"
+      @refresh-row="$emit('refresh-row')"
+    ></ForeignRowEditModal>
   </div>
 </template>
 
 <script>
+import { mapGetters } from 'vuex'
+
+import { getPersistentFieldOptionsKey } from '@baserow/modules/database/utils/field'
 import { isElement } from '@baserow/modules/core/utils/dom'
 import gridField from '@baserow/modules/database/mixins/gridField'
 import linkRowField from '@baserow/modules/database/mixins/linkRowField'
 import SelectRowModal from '@baserow/modules/database/components/row/SelectRowModal'
+import ForeignRowEditModal from '@baserow/modules/database/components/row/ForeignRowEditModal'
+import { notifyIf } from '@baserow/modules/core/utils/error'
+import { DatabaseApplicationType } from '@baserow/modules/database/applicationTypes'
+import { isPrintableUnicodeCharacterKeyPress } from '@baserow/modules/core/utils/events'
 
 export default {
   name: 'GridViewFieldLinkRow',
-  components: { SelectRowModal },
+  components: { ForeignRowEditModal, SelectRowModal },
   mixins: [gridField, linkRowField],
   data() {
     return {
       modalOpen: false,
+      itemLoadingId: -1,
+    }
+  },
+  computed: {
+    // Return the reactive object that can be updated in runtime.
+    workspace() {
+      return this.$store.getters['workspace/get'](this.workspaceId)
+    },
+    canAccessLinkedTable() {
+      const linkedTable = this.allTables.find(
+        ({ id }) => id === this.field.link_row_table_id
+      )
+
+      if (!linkedTable) {
+        return false
+      }
+
+      return (
+        this.$hasPermission(
+          'database.table.read',
+          linkedTable,
+          this.workspace.id
+        ) && !this.readOnly
+      )
+    },
+    allTables() {
+      const databaseType = DatabaseApplicationType.getType()
+      return this.$store.getters['application/getAll'].reduce(
+        (tables, application) => {
+          if (application.type === databaseType) {
+            return tables.concat(application.tables || [])
+          }
+          return tables
+        },
+        []
+      )
+    },
+  },
+  beforeCreate() {
+    this.$options.computed = {
+      ...(this.$options.computed || {}),
+      ...mapGetters({
+        publicGrid: 'page/view/public/getIsPublic',
+      }),
     }
   },
   methods: {
+    getPersistentFieldOptionsKey(fieldId) {
+      return getPersistentFieldOptionsKey(fieldId)
+    },
     select() {
-      // While the field is selected we want to open the select row popup by pressing
+      // While the field is selected we want to open the select row toast by pressing
       // the enter key.
       this.$el.keydownEvent = (event) => {
-        if (event.keyCode === 13 && !this.modalOpen) {
+        // If the tab or arrow keys are pressed we don't want to do anything because
+        // the GridViewField component will select the next field.
+        const ignoredKeys = [
+          'Tab',
+          'ArrowLeft',
+          'ArrowUp',
+          'ArrowRight',
+          'ArrowDown',
+        ]
+        if (ignoredKeys.includes(event.key)) {
+          return
+        }
+
+        // If the space bar key is pressed, we don't want to do anything because it
+        // should open the row edit modal.
+        if (event.key === ' ') {
+          return
+        }
+
+        // When the enter key, or any printable character is pressed when not editing
+        // the value we want to show the select row modal.
+        if (
+          !this.modalOpen &&
+          (event.key === 'Enter' || isPrintableUnicodeCharacterKeyPress(event))
+        ) {
           this.showModal()
         }
       }
@@ -77,7 +180,32 @@ export default {
      * inside one of these contexts.
      */
     canUnselectByClickingOutside(event) {
-      return !isElement(this.$refs.selectModal.$el, event.target)
+      if (!this.canAccessLinkedTable) {
+        return true
+      }
+
+      const openModals = [
+        ...this.$refs.selectModal.$refs.modal.moveToBody.children.map(
+          (child) => child.$el
+        ),
+        this.$refs.selectModal.$el,
+        ...this.$refs.rowEditModal.$refs.modal.$refs.modal.moveToBody.children.map(
+          (child) => child.$el
+        ),
+        this.$refs.rowEditModal.$refs.modal.$el,
+      ]
+
+      return (
+        // If the user clicks inside the select or row edit modal, we don't want to
+        // allow unselecting.
+        !openModals.some((modal) => {
+          return isElement(modal, event.target)
+        }) &&
+        // If an element is not part of the body anymore, then it was deleted, and then
+        // we don't have to unselect. This can for example happen when the user clicks
+        // on something that will deleted because of it.
+        document.body.contains(event.target)
+      )
     },
     /**
      * Prevent unselecting the field cell by changing the event. Because the deleted
@@ -89,7 +217,7 @@ export default {
       return linkRowField.methods.removeValue.call(this, event, value, id)
     },
     showModal() {
-      if (this.readOnly) {
+      if (!this.canAccessLinkedTable) {
         return
       }
 
@@ -103,17 +231,30 @@ export default {
      * While the modal is open, all key combinations related to the field must be
      * ignored.
      */
-    canKeyDown(event) {
+    canSelectNext() {
       return !this.modalOpen
     },
-    canPaste() {
+    canKeyDown() {
       return !this.modalOpen
     },
-    canCopy() {
+    canKeyboardShortcut() {
       return !this.modalOpen
     },
-    canEmpty() {
-      return !this.modalOpen
+    async showForeignRowModal(item) {
+      // It's not possible to open the related row when the view is shared publicly
+      // because the visitor doesn't have the right permissions.
+      if (this.publicGrid || !this.canAccessLinkedTable) {
+        return
+      }
+
+      this.itemLoadingId = item.id
+      try {
+        await this.$refs.rowEditModal.show(item.id)
+        this.modalOpen = true
+      } catch (error) {
+        notifyIf(error)
+      }
+      this.itemLoadingId = -1
     },
   },
 }

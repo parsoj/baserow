@@ -6,7 +6,7 @@
       'copied--hide': hide,
     }"
   >
-    Copied!
+    {{ $t('copied.label') }}
   </div>
 </template>
 

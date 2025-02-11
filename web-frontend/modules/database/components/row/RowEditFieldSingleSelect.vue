@@ -1,15 +1,16 @@
 <template>
   <div class="control__elements">
-    <FieldSingleSelectDropdown
+    <FieldSelectOptionsDropdown
       :value="valueId"
-      :options="field.select_options"
-      :allow-create-option="true"
+      :options="singleSelectOptions"
+      :allow-create-option="allowCreateOptions"
       :disabled="readOnly"
-      :class="{ 'dropdown--error': touched && !valid }"
+      :error="touched && !valid"
+      size="large"
       @input="updateValue($event, value)"
       @create-option="createOption($event)"
       @hide="touch()"
-    ></FieldSingleSelectDropdown>
+    ></FieldSelectOptionsDropdown>
     <div v-show="touched && !valid" class="error">
       {{ error }}
     </div>
@@ -19,13 +20,28 @@
 <script>
 import rowEditField from '@baserow/modules/database/mixins/rowEditField'
 import singleSelectField from '@baserow/modules/database/mixins/singleSelectField'
+import FieldSelectOptionsDropdown from '@baserow/modules/database/components/field/FieldSelectOptionsDropdown'
 
 export default {
-  name: 'RowEditFieldSingleSelectVue',
+  name: 'RowEditFieldSingleSelect',
+  components: { FieldSelectOptionsDropdown },
   mixins: [rowEditField, singleSelectField],
-  methods: {
-    updateValue(...args) {
-      singleSelectField.methods.updateValue.call(this, ...args)
+  props: {
+    allowCreateOptions: {
+      type: Boolean,
+      default: true,
+      required: false,
+    },
+  },
+  computed: {
+    singleSelectOptions() {
+      if (this.field.select_options) {
+        return this.field.select_options
+      } else if (this.value) {
+        return [this.value]
+      } else {
+        return []
+      }
     },
   },
 }

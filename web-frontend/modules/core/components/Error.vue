@@ -1,11 +1,8 @@
 <template>
-  <div v-if="error.visible" class="alert alert--error alert--has-icon">
-    <div class="alert__icon">
-      <i class="fas fa-exclamation"></i>
-    </div>
-    <div class="alert__title">{{ error.title }}</div>
-    <p class="alert__content">{{ error.message }}</p>
-  </div>
+  <Alert v-if="error.visible" type="error">
+    <template #title>{{ error.title }}</template>
+    <p>{{ error.message }}</p>
+  </Alert>
 </template>
 
 <script>

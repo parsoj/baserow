@@ -5,6 +5,9 @@
       'grid-view__column--filtered':
         !view.filters_disabled &&
         view.filters.findIndex((filter) => filter.field === field.id) !== -1,
+      'grid-view__column--grouped':
+        view.group_bys.findIndex((groupBy) => groupBy.field === field.id) !==
+        -1,
       'grid-view__column--sorted':
         view.sortings.findIndex((sort) => sort.field === field.id) !== -1,
     }"
@@ -15,94 +18,256 @@
       class="grid-view__description"
       :class="{ 'grid-view__description--loading': field._.loading }"
     >
-      <div class="grid-view__description-icon">
-        <i class="fas" :class="'fa-' + field._.type.iconClass"></i>
+      <div class="grid-view__description-icon-container">
+        <i :class="`grid-view__description-icon ${field._.type.iconClass}`"></i>
+        <i
+          v-if="synced"
+          v-tooltip="$t('gridViewFieldType.dataSyncField')"
+          class="grid-view__description-icon-synced iconoir-data-transfer-down"
+        ></i>
       </div>
-      <div class="grid-view__description-name">{{ field.name }}</div>
-      <a
-        v-if="!readOnly"
-        ref="contextLink"
-        class="grid-view__description-options"
-        @click="$refs.context.toggle($refs.contextLink, 'bottom', 'right', 0)"
-        @mousedown.stop
+
+      <div
+        class="grid-view__description-name"
+        :title="field.name + (synced ? ' (synced)' : '')"
       >
-        <i class="fas fa-caret-down"></i>
-      </a>
+        <span ref="quickEditLink" @dblclick="handleQuickEdit()">
+          {{ field.name }}
+        </span>
+      </div>
+      <div v-if="field.error" class="grid-view__description-icon-error">
+        <i v-tooltip="field.error" class="iconoir-warning-triangle"></i>
+      </div>
+      <span class="grid-view__description-options">
+        <HelpIcon
+          v-if="field.description"
+          :tooltip="field.description || ''"
+          :tooltip-content-type="'plain'"
+          :tooltip-content-classes="[
+            'tooltip__content--expandable',
+            'tooltip__content--expandable-plain-text',
+          ]"
+          :icon="'info-empty'"
+        />
+
+        <a
+          v-if="!readOnly && showFieldContext"
+          ref="contextLink"
+          class="grid-view__description-icon-trigger"
+          @click="$refs.context.toggle($refs.contextLink, 'bottom', 'right', 0)"
+          @mousedown.stop
+        >
+          <i class="iconoir-nav-arrow-down"></i>
+        </a>
+      </span>
+
       <FieldContext
         v-if="!readOnly"
         ref="context"
+        :database="database"
         :table="table"
+        :view="view"
         :field="field"
+        :all-fields-in-table="allFieldsInTable"
         @update="$emit('refresh', $event)"
         @delete="$emit('refresh')"
       >
-        <li v-if="canFilter">
-          <a @click="createFilter($event, view, field)">
-            <i class="context__menu-icon fas fa-fw fa-filter"></i>
-            Create filter
+        <li
+          v-if="
+            !field.primary &&
+            !readOnly &&
+            $hasPermission(
+              'database.table.create_field',
+              table,
+              database.workspace.id
+            )
+          "
+          class="context__menu-item"
+        >
+          <a
+            ref="insertLeftLink"
+            class="context__menu-item-link"
+            @click="
+              $refs.insertFieldContext.toggle($refs.insertLeftLink, 'left')
+            "
+          >
+            <i class="context__menu-item-icon iconoir-arrow-left"></i>
+            {{ $t('gridViewFieldType.insertLeft') }}
           </a>
         </li>
-        <li v-if="field._.type.canSortInView">
-          <a @click="createSort($event, view, field, 'ASC')">
-            <i class="context__menu-icon fas fa-fw fa-sort-amount-down-alt"></i>
-            Sort
-            <template v-if="field._.type.sortIndicator[0] === 'text'">{{
-              field._.type.sortIndicator[1]
+        <li
+          v-if="
+            !field.primary &&
+            !readOnly &&
+            $hasPermission(
+              'database.table.create_field',
+              table,
+              database.workspace.id
+            )
+          "
+          class="context__menu-item"
+        >
+          <a
+            ref="insertRightLink"
+            class="context__menu-item-link"
+            @click="
+              $refs.insertFieldContext.toggle($refs.insertRightLink, 'right')
+            "
+          >
+            <i class="context__menu-item-icon iconoir-arrow-right"></i>
+            {{ $t('gridViewFieldType.insertRight') }}
+          </a>
+          <InsertFieldContext
+            ref="insertFieldContext"
+            :table="table"
+            :view="view"
+            :from-field="field"
+            :all-fields-in-table="allFieldsInTable"
+            :database="database"
+            @field-created="$emit('field-created', $event)"
+            @move-field="moveField($event)"
+          ></InsertFieldContext>
+        </li>
+        <li
+          v-if="
+            !readOnly &&
+            $hasPermission(
+              'database.table.field.duplicate',
+              field,
+              database.workspace.id
+            )
+          "
+          class="context__menu-item"
+        >
+          <a
+            class="context__menu-item-link"
+            @click=";[$refs.duplicateFieldModal.toggle(), $refs.context.hide()]"
+          >
+            <i class="context__menu-item-icon iconoir-copy"></i>
+            {{ $t('gridViewFieldType.duplicate') }}
+          </a>
+          <DuplicateFieldModal
+            ref="duplicateFieldModal"
+            :table="table"
+            :from-field="field"
+            :all-fields-in-table="allFieldsInTable"
+            @field-created="$emit('field-created', $event)"
+            @move-field="moveField($event)"
+          ></DuplicateFieldModal>
+        </li>
+        <li />
+        <li
+          v-if="
+            canFilter &&
+            $hasPermission(
+              'database.table.view.create_filter',
+              view,
+              database.workspace.id
+            )
+          "
+          class="context__menu-item"
+        >
+          <a
+            class="context__menu-item-link"
+            @click="createFilter($event, view, field)"
+          >
+            <i class="context__menu-item-icon iconoir-filter"></i>
+            {{ $t('gridViewFieldType.createFilter') }}
+          </a>
+        </li>
+        <li
+          v-if="
+            getCanSortInView(field) &&
+            $hasPermission(
+              'database.table.view.create_sort',
+              view,
+              database.workspace.id
+            )
+          "
+          class="context__menu-item"
+        >
+          <a
+            class="context__menu-item-link"
+            @click="createSort($event, view, field, 'ASC')"
+          >
+            <i class="context__menu-item-icon iconoir-sort-down"></i>
+            {{ $t('gridViewFieldType.sortField') }}
+            <template v-if="getSortIndicator(field, 0) === 'text'">{{
+              getSortIndicator(field, 1)
             }}</template>
             <i
-              v-if="field._.type.sortIndicator[0] === 'icon'"
-              class="fa"
-              :class="'fa-' + field._.type.sortIndicator[1]"
+              v-if="getSortIndicator(field, 0) === 'icon'"
+              :class="getSortIndicator(field, 1)"
             ></i>
-            <i class="fas fa-long-arrow-alt-right"></i>
-            <template v-if="field._.type.sortIndicator[0] === 'text'">{{
-              field._.type.sortIndicator[2]
+            <i class="iconoir-arrow-right"></i>
+            <template v-if="getSortIndicator(field, 0) === 'text'">{{
+              getSortIndicator(field, 2)
             }}</template>
             <i
-              v-if="field._.type.sortIndicator[0] === 'icon'"
-              class="fa"
-              :class="'fa-' + field._.type.sortIndicator[2]"
+              v-if="getSortIndicator(field, 0) === 'icon'"
+              :class="getSortIndicator(field, 2)"
             ></i>
           </a>
         </li>
-        <li v-if="field._.type.canSortInView">
-          <a @click="createSort($event, view, field, 'DESC')">
-            <i class="context__menu-icon fas fa-fw fa-sort-amount-down"></i>
-            Sort
-            <template v-if="field._.type.sortIndicator[0] === 'text'">{{
-              field._.type.sortIndicator[2]
+        <li
+          v-if="
+            getCanSortInView(field) &&
+            $hasPermission(
+              'database.table.view.create_sort',
+              view,
+              database.workspace.id
+            )
+          "
+          class="context__menu-item"
+        >
+          <a
+            class="context__menu-item-link"
+            @click="createSort($event, view, field, 'DESC')"
+          >
+            <i class="context__menu-item-icon iconoir-sort-down"></i>
+            {{ $t('gridViewFieldType.sortField') }}
+            <template v-if="getSortIndicator(field, 0) === 'text'">{{
+              getSortIndicator(field, 2)
             }}</template>
             <i
-              v-if="field._.type.sortIndicator[0] === 'icon'"
-              class="fa"
-              :class="'fa-' + field._.type.sortIndicator[2]"
+              v-if="getSortIndicator(field, 0) === 'icon'"
+              :class="getSortIndicator(field, 2)"
             ></i>
-            <i class="fas fa-long-arrow-alt-right"></i>
-            <template v-if="field._.type.sortIndicator[0] === 'text'">{{
-              field._.type.sortIndicator[1]
+            <i class="iconoir-arrow-right"></i>
+            <template v-if="getSortIndicator(field, 0) === 'text'">{{
+              getSortIndicator(field, 1)
             }}</template>
             <i
-              v-if="field._.type.sortIndicator[0] === 'icon'"
-              class="fa"
-              :class="'fa-' + field._.type.sortIndicator[1]"
+              v-if="getSortIndicator(field, 0) === 'icon'"
+              :class="getSortIndicator(field, 1)"
             ></i>
           </a>
         </li>
-        <li v-if="!field.primary && canFilter">
-          <a @click="hide($event, view, field)">
-            <i class="context__menu-icon fas fa-fw fa-eye-slash"></i>
-            Hide field
+        <li
+          v-if="
+            !field.primary &&
+            $hasPermission(
+              'database.table.view.update_field_options',
+              view,
+              database.workspace.id
+            )
+          "
+          class="context__menu-item"
+        >
+          <a class="context__menu-item-link" @click="hide($event, view, field)">
+            <i class="context__menu-item-icon iconoir-eye-off"></i>
+            {{ $t('gridViewFieldType.hideField') }}
           </a>
         </li>
       </FieldContext>
-      <GridViewFieldWidthHandle
-        v-if="includeFieldWidthHandles && !readOnly"
+      <HorizontalResize
+        v-if="includeFieldWidthHandles"
         class="grid-view__description-width"
-        :grid="view"
-        :field="field"
         :width="width"
-        :store-prefix="storePrefix"
-      ></GridViewFieldWidthHandle>
+        :min="100"
+        @move="moveFieldWidth(field, $event)"
+        @update="updateFieldWidth(field, view, database, readOnly, $event)"
+      ></HorizontalResize>
     </div>
   </div>
 </template>
@@ -112,14 +277,25 @@ import { mapGetters } from 'vuex'
 import { notifyIf } from '@baserow/modules/core/utils/error'
 
 import FieldContext from '@baserow/modules/database/components/field/FieldContext'
-import GridViewFieldWidthHandle from '@baserow/modules/database/components/view/grid/GridViewFieldWidthHandle'
+import InsertFieldContext from '@baserow/modules/database/components/field/InsertFieldContext'
+import DuplicateFieldModal from '@baserow/modules/database/components/field/DuplicateFieldModal'
+import HorizontalResize from '@baserow/modules/core/components/HorizontalResize'
 import gridViewHelpers from '@baserow/modules/database/mixins/gridViewHelpers'
 
 export default {
   name: 'GridViewFieldType',
-  components: { FieldContext, GridViewFieldWidthHandle },
+  components: {
+    HorizontalResize,
+    FieldContext,
+    InsertFieldContext,
+    DuplicateFieldModal,
+  },
   mixins: [gridViewHelpers],
   props: {
+    database: {
+      type: Object,
+      required: true,
+    },
     table: {
       type: Object,
       required: true,
@@ -140,6 +316,10 @@ export default {
       type: Boolean,
       required: true,
     },
+    allFieldsInTable: {
+      type: Array,
+      required: true,
+    },
   },
   data() {
     return {
@@ -148,16 +328,63 @@ export default {
   },
   computed: {
     width() {
-      return this.getFieldWidth(this.field.id)
+      return this.getFieldWidth(this.field)
     },
     canFilter() {
       const filters = Object.values(this.$registry.getAll('viewFilter'))
       for (const type in filters) {
-        if (filters[type].compatibleFieldTypes.includes(this.field.type)) {
+        if (filters[type].fieldIsCompatible(this.field)) {
           return true
         }
       }
       return false
+    },
+    showFieldContext() {
+      return (
+        this.$hasPermission(
+          'database.table.create_field',
+          this.table,
+          this.database.workspace.id
+        ) ||
+        this.$hasPermission(
+          'database.table.view.create_filter',
+          this.view,
+          this.database.workspace.id
+        ) ||
+        this.$hasPermission(
+          'database.table.view.create_sort',
+          this.view,
+          this.database.workspace.id
+        ) ||
+        this.$hasPermission(
+          'database.table.view.update_field_options',
+          this.view,
+          this.database.workspace.id
+        ) ||
+        this.$hasPermission(
+          'database.table.field.duplicate',
+          this.field,
+          this.database.workspace.id
+        ) ||
+        this.$hasPermission(
+          'database.table.field.update',
+          this.field,
+          this.database.workspace.id
+        ) ||
+        this.$hasPermission(
+          'database.table.field.delete',
+          this.field,
+          this.database.workspace.id
+        )
+      )
+    },
+    synced() {
+      if (!this.table.data_sync) {
+        return false
+      }
+      return this.table.data_sync.synced_properties.some((p) => {
+        return p.field_id === this.field.id
+      })
     },
   },
   beforeCreate() {
@@ -170,6 +397,24 @@ export default {
     }
   },
   methods: {
+    moveField($event) {
+      this.$emit('move-field', $event)
+      this.$refs.context.hide()
+    },
+    async handleQuickEdit() {
+      if (this.readOnly) return false
+      await this.$refs.context.toggle(
+        this.$refs.quickEditLink,
+        'bottom',
+        'left',
+        0
+      )
+      this.$refs.context.showUpdateFieldContext()
+    },
+    quickEditField($event) {
+      this.$emit('updated', $event)
+      this.$refs.context.hide()
+    },
     async createFilter(event, view, field) {
       // Prevent the event from propagating to the body so that it does not close the
       // view filter context menu right after it has been opened. This is due to the
@@ -232,6 +477,11 @@ export default {
             field,
             values: { hidden: true },
             oldValues: { hidden: false },
+            readOnly: !this.$hasPermission(
+              'database.table.view.update_field_options',
+              this.view,
+              this.database.workspace.id
+            ),
           }
         )
       } catch (error) {
@@ -239,12 +489,15 @@ export default {
       }
     },
     startDragging(event, field) {
-      if (this.readOnly) {
-        return
-      }
-
-      event.preventDefault()
       this.$emit('dragging', { field, event })
+    },
+    getSortIndicator(field, index) {
+      return this.$registry
+        .get('field', field.type)
+        .getSortIndicator(field, this.$registry)[index]
+    },
+    getCanSortInView(field) {
+      return this.$registry.get('field', field.type).getCanSortInView(field)
     },
   },
 }

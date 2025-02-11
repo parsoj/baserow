@@ -1,21 +1,31 @@
-import pytest
+import os
+from unittest.mock import Mock
+
 from django.core.exceptions import ValidationError
 from django.test.utils import override_settings
+
+import pytest
 from faker import Faker
 
 from baserow.contrib.database.fields.field_types import (
+    LinkRowFieldType,
+    LookupFieldType,
     PhoneNumberFieldType,
+    TextFieldType,
 )
 from baserow.contrib.database.fields.handler import FieldHandler
 from baserow.contrib.database.fields.models import (
-    LongTextField,
-    URLField,
     EmailField,
+    LongTextField,
     PhoneNumberField,
+    URLField,
 )
-from baserow.contrib.database.fields.registries import field_type_registry
+from baserow.contrib.database.fields.registries import FieldType, field_type_registry
+from baserow.contrib.database.fields.utils import DeferredForeignKeyUpdater
 from baserow.contrib.database.rows.handler import RowHandler
-from tests.test_utils import setup_interesting_test_table
+from baserow.contrib.database.views.registries import view_filter_type_registry
+from baserow.core.registries import ImportExportConfig
+from baserow.test_utils.helpers import setup_interesting_test_table
 
 
 @pytest.mark.django_db
@@ -28,14 +38,112 @@ def test_import_export_text_field(data_fixture):
     text_field_type = field_type_registry.get_by_model(text_field)
     text_serialized = text_field_type.export_serialized(text_field)
     text_field_imported = text_field_type.import_serialized(
-        text_field.table, text_serialized, id_mapping
+        text_field.table,
+        text_serialized,
+        ImportExportConfig(include_permission_data=True),
+        id_mapping,
+        DeferredForeignKeyUpdater(),
+    )
+    assert text_field.id != text_field_imported.id
+    assert text_field.name == text_field_imported.name
+    assert text_field.description == text_field_imported.description
+    assert text_field.order == text_field_imported.order
+    assert text_field.primary == text_field_imported.primary
+    assert text_field.text_default == text_field_imported.text_default
+    assert id_mapping["database_fields"][text_field.id] == text_field_imported.id
+
+
+@pytest.mark.django_db
+def test_import_export_text_field_with_description(data_fixture):
+    id_mapping = {}
+
+    text_field = data_fixture.create_text_field(
+        name="Text name", text_default="", description="test"
+    )
+    text_field_type = field_type_registry.get_by_model(text_field)
+    text_serialized = text_field_type.export_serialized(text_field)
+    text_field_imported = text_field_type.import_serialized(
+        text_field.table,
+        text_serialized,
+        ImportExportConfig(include_permission_data=True),
+        id_mapping,
+        DeferredForeignKeyUpdater(),
+    )
+    assert text_field.id != text_field_imported.id
+    assert text_field.description == text_field_imported.description == "test"
+
+
+@pytest.mark.django_db
+def test_import_export_immutable_field(data_fixture):
+    id_mapping = {}
+
+    text_field = data_fixture.create_text_field(
+        name="Text name",
+        text_default="Text default",
+        read_only=True,
+        immutable_type=True,
+        immutable_properties=True,
+    )
+    text_field_type = field_type_registry.get_by_model(text_field)
+    text_serialized = text_field_type.export_serialized(text_field)
+    text_field_imported = text_field_type.import_serialized(
+        text_field.table,
+        text_serialized,
+        ImportExportConfig(include_permission_data=True),
+        id_mapping,
+        DeferredForeignKeyUpdater(),
     )
     assert text_field.id != text_field_imported.id
     assert text_field.name == text_field_imported.name
     assert text_field.order == text_field_imported.order
     assert text_field.primary == text_field_imported.primary
     assert text_field.text_default == text_field_imported.text_default
+    assert text_field.immutable_type is text_field_imported.immutable_type is True
+    assert (
+        text_field.immutable_properties
+        is text_field_imported.immutable_properties
+        is True
+    )
+    assert text_field.read_only == text_field_imported.read_only is True
     assert id_mapping["database_fields"][text_field.id] == text_field_imported.id
+
+
+@pytest.mark.django_db
+def test_import_export_formula_field(data_fixture, api_client):
+    user, token = data_fixture.create_user_and_token()
+    first_table = data_fixture.create_database_table(user=user)
+    second_table = data_fixture.create_database_table(user=user)
+    id_mapping = {}
+
+    text_field = data_fixture.create_text_field(
+        table=first_table, name="Text name", text_default="Text default"
+    )
+    formula_field = data_fixture.create_formula_field(
+        table=first_table,
+        name="formula field",
+        formula=f"field('{text_field.name}')",
+        formula_type="text",
+    )
+    formula_field_type = field_type_registry.get_by_model(formula_field)
+    formula_serialized = formula_field_type.export_serialized(formula_field)
+    assert formula_serialized["formula"] == "field('Text name')"
+
+    text_field_in_diff_table = data_fixture.create_text_field(
+        table=second_table, name="Text name", text_default="Text default"
+    )
+    formula_field_imported = formula_field_type.import_serialized(
+        text_field_in_diff_table.table,
+        formula_serialized,
+        ImportExportConfig(include_permission_data=True),
+        id_mapping,
+        DeferredForeignKeyUpdater(),
+    )
+    assert formula_field.id != formula_field_imported.id
+    assert formula_field.name == formula_field_imported.name
+    assert formula_field.order == formula_field_imported.order
+    assert formula_field.primary == formula_field_imported.primary
+    assert formula_field_imported.formula == f"field('Text name')"
+    assert id_mapping["database_fields"][formula_field.id] == formula_field_imported.id
 
 
 @pytest.mark.django_db
@@ -65,131 +173,94 @@ def test_long_text_field_type(data_fixture):
 
 
 @pytest.mark.django_db
-def test_url_field_type(data_fixture):
+def test_valid_url(data_fixture):
     user = data_fixture.create_user()
     table = data_fixture.create_database_table(user=user)
     data_fixture.create_database_table(user=user, database=table.database)
     field = data_fixture.create_text_field(table=table, order=1, name="name")
-
     field_handler = FieldHandler()
     row_handler = RowHandler()
 
-    field_2 = field_handler.create_field(
-        user=user, table=table, type_name="url", name="url"
-    )
-    number = field_handler.create_field(
-        user=user, table=table, type_name="number", name="number"
-    )
-
+    field_handler.create_field(user=user, table=table, type_name="url", name="URL")
     assert len(URLField.objects.all()) == 1
+
     model = table.get_model(attribute_names=True)
 
-    with pytest.raises(ValidationError):
+    valid_urls = [
+        "baserow.io",
+        "ftp://baserow.io",
+        "git://example.com/",
+        "ws://baserow.io",
+        "http://baserow.io",
+        "https://baserow.io",
+        "https://www.baserow.io",
+        "HTTP://BASEROW.IO",
+        "https://test.nl/test",
+        "https://test.nl/test",
+        "http://localhost",
+        "//localhost",
+        "https://test.nl/test?with=a-query&that=has-more",
+        "https://test.nl/test",
+        "http://-.~_!$&'()*+,;=%40:80%2f@example.com",
+        "http://उदाहरण.परीक्षा",
+        "http://foo.com/(something)?after=parens",
+        "http://142.42.1.1/",
+        "http://userid:password@example.com:65535/",
+        "http://su--b.valid-----hyphens.com/",
+        "//baserow.io/test",
+        "127.0.0.1",
+        "https://test.nl#test",
+        "http://baserow.io/hrscywv4p/image/upload/c_fill,g_faces:center,"
+        "h_128,w_128/yflwk7vffgwyyenftkr7.png",
+        "https://gitlab.com/baserow/baserow/-/issues?row=nice/route",
+        "https://web.archive.org/web/20210313191012/https://baserow.io/",
+        "mailto:bram@baserow.io?test=test",
+    ]
+    invalid_urls = [
+        "test",
+        "test.",
+        "localhost",
+        "\nwww.test.nl",
+        "www\n.test.nl",
+        "www .test.nl",
+        " www.test.nl",
+    ]
+
+    for invalid_url in invalid_urls:
+        with pytest.raises(ValidationError):
+            row_handler.create_row(
+                user=user, table=table, values={"url": invalid_url}, model=model
+            )
+
+    for url in valid_urls:
         row_handler.create_row(
-            user=user, table=table, values={"url": "invalid_url"}, model=model
+            user=user,
+            table=table,
+            values={"url": url, "name": url},
+            model=model,
+        )
+    for bad_url in invalid_urls:
+        row_handler.create_row(
+            user=user,
+            table=table,
+            values={"url": "", "name": bad_url},
+            model=model,
         )
 
-    with pytest.raises(ValidationError):
-        row_handler.create_row(
-            user=user, table=table, values={"url": "httpss"}, model=model
-        )
-
-    with pytest.raises(ValidationError):
-        row_handler.create_row(
-            user=user, table=table, values={"url": "httpss"}, model=model
-        )
-
-    very_long_url = "https://baserow.io/with-a-very-long-url-that-exceeds-the-old-254-"
-    "char-limit/with-a-very-long-url-that-exceeds-the-old-254-char-limit/with-a-very-"
-    "long-url-that-exceeds-the-old-254-char-limit/with-a-very-long-url-that-exceeds"
-    "-the-old-254-char/with-a-very-long-url-that-exceeds-the-old-254-char/"
-
-    row_handler.create_row(
-        user=user,
-        table=table,
-        values={"name": "http://test.nl", "url": very_long_url, "number": 5},
-        model=model,
-    )
-    row_handler.create_row(
-        user=user,
-        table=table,
-        values={"name": "http;//", "url": "http://localhost", "number": 10},
-        model=model,
-    )
-    row_handler.create_row(
-        user=user,
-        table=table,
-        values={"name": "bram@test.nl", "url": "http://www.baserow.io"},
-        model=model,
-    )
-    row_handler.create_row(
-        user=user,
-        table=table,
-        values={
-            "name": "NOT A URL",
-            "url": "http://www.baserow.io/blog/building-a-database",
-        },
-        model=model,
-    )
-    row_handler.create_row(
-        user=user,
-        table=table,
-        values={
-            "name": "ftps://www.complex.website.com?querystring=test&something=else",
-            "url": "",
-        },
-        model=model,
-    )
-    row_handler.create_row(
-        user=user,
-        table=table,
-        values={
-            "url": None,
-        },
-        model=model,
-    )
-    row_handler.create_row(user=user, table=table, values={}, model=model)
-
-    # Convert to text field to a url field so we can check how the conversion of values
-    # went.
+    # Convert the text field to a url field so we can check how the conversion of
+    # values went.
     field_handler.update_field(user=user, field=field, new_type_name="url")
-    field_handler.update_field(user=user, field=number, new_type_name="url")
-
-    model = table.get_model(attribute_names=True)
     rows = model.objects.all()
+    valid_urls_rows = rows[: len(valid_urls)]
+    invalid_urls_rows = rows[len(valid_urls) :]
 
-    assert rows[0].name == "http://test.nl"
-    assert rows[0].url == very_long_url
-    assert rows[0].number == ""
+    for url, row in zip(valid_urls, valid_urls_rows):
+        assert row.url == url
+        assert row.name == url
 
-    assert rows[1].name == ""
-    assert rows[1].url == "http://localhost"
-    assert rows[1].number == ""
-
-    assert rows[2].name == ""
-    assert rows[2].url == "http://www.baserow.io"
-    assert rows[2].number == ""
-
-    assert rows[3].name == ""
-    assert rows[3].url == "http://www.baserow.io/blog/building-a-database"
-    assert rows[3].number == ""
-
-    assert (
-        rows[4].name == "ftps://www.complex.website.com?querystring=test&something=else"
-    )
-    assert rows[4].url == ""
-    assert rows[4].number == ""
-
-    assert rows[5].name == ""
-    assert rows[5].url == ""
-    assert rows[5].number == ""
-
-    assert rows[6].name == ""
-    assert rows[6].url == ""
-    assert rows[6].number == ""
-
-    field_handler.delete_field(user=user, field=field_2)
-    assert len(URLField.objects.all()) == 2
+    for row in invalid_urls_rows:
+        assert row.url == ""
+        assert row.name == ""
 
 
 @pytest.mark.django_db
@@ -258,16 +329,15 @@ def test_valid_email(data_fixture):
     # values went.
     field_handler.update_field(user=user, field=field, new_type_name="email")
     rows = model.objects.all()
-    i = 0
-    for email in valid_emails:
-        assert rows[i].email == email
-        assert rows[i].name == email
-        i += 1
+    valid_emails_rows = rows[: len(valid_emails)]
+    invalid_emails_rows = rows[len(valid_emails) :]
+    for email, row in zip(valid_emails, valid_emails_rows):
+        assert row.email == email
+        assert row.name == email
 
-    for _ in invalid_emails:
-        assert rows[i].email == ""
-        assert rows[i].name == ""
-        i += 1
+    for row in invalid_emails_rows:
+        assert row.email == ""
+        assert row.name == ""
 
 
 @pytest.mark.django_db
@@ -340,37 +410,38 @@ def test_email_field_type(data_fixture):
 
     model = table.get_model(attribute_names=True)
     rows = model.objects.all()
+    row_0, row_1, row_2, row_3, row_4, row_5 = rows
 
-    assert rows[0].name == "a.very.STRANGE@email.address.coM"
-    assert rows[0].email == "test@test.nl"
-    assert rows[0].number == ""
+    assert row_0.name == "a.very.STRANGE@email.address.coM"
+    assert row_0.email == "test@test.nl"
+    assert row_0.number == ""
 
-    assert rows[1].name == ""
-    assert rows[1].email == "some@user.com"
-    assert rows[1].number == ""
+    assert row_1.name == ""
+    assert row_1.email == "some@user.com"
+    assert row_1.number == ""
 
-    assert rows[2].name == ""
-    assert rows[2].email == "bram@test.nl"
-    assert rows[2].number == ""
+    assert row_2.name == ""
+    assert row_2.email == "bram@test.nl"
+    assert row_2.number == ""
 
-    assert rows[3].name == ""
-    assert rows[3].email == "something@example.com"
-    assert rows[3].number == ""
+    assert row_3.name == ""
+    assert row_3.email == "something@example.com"
+    assert row_3.number == ""
 
-    assert rows[4].name == "testing@nowhere.org"
-    assert rows[4].email == ""
-    assert rows[4].number == ""
+    assert row_4.name == "testing@nowhere.org"
+    assert row_4.email == ""
+    assert row_4.number == ""
 
-    assert rows[5].name == ""
-    assert rows[5].email == ""
-    assert rows[5].number == ""
+    assert row_5.name == ""
+    assert row_5.email == ""
+    assert row_5.number == ""
 
     field_handler.delete_field(user=user, field=field_2)
     assert len(EmailField.objects.all()) == 2
 
 
 @pytest.mark.django_db
-@override_settings(debug=True)
+@override_settings(DEBUG=True)
 def test_phone_number_field_type(data_fixture):
     user = data_fixture.create_user()
     table = data_fixture.create_database_table(user=user)
@@ -479,23 +550,24 @@ def test_phone_number_field_type(data_fixture):
 
     model = table.get_model(attribute_names=True)
     rows = model.objects.all()
+    row_0, row_1, row_2, row_3, _ = rows
 
-    assert rows[0].name == "+45(1424) 322314 324234"
-    assert rows[0].phonenumber == max_length_phone_number
-    assert rows[0].number == "1234534532"
-    assert rows[0].email == ""
+    assert row_0.name == "+45(1424) 322314 324234"
+    assert row_0.phonenumber == max_length_phone_number
+    assert row_0.number == "1234534532"
+    assert row_0.email == ""
 
-    assert rows[1].name == ""
-    assert rows[1].phonenumber == "1234567890 NnXx,+._*()#=;/ -"
-    assert rows[1].number == "0"
+    assert row_1.name == ""
+    assert row_1.phonenumber == "1234567890 NnXx,+._*()#=;/ -"
+    assert row_1.number == "0"
 
-    assert rows[2].name == max_length_phone_number
-    assert rows[2].phonenumber == ""
-    assert rows[2].number == "-10230450"
+    assert row_2.name == max_length_phone_number
+    assert row_2.phonenumber == ""
+    assert row_2.number == "-10230450"
 
-    assert rows[3].name == ""
-    assert rows[3].phonenumber == ""
-    assert rows[3].number == ""
+    assert row_3.name == ""
+    assert row_3.phonenumber == ""
+    assert row_3.number == ""
 
     field_handler.delete_field(user=user, field=phone_number_field)
     assert len(PhoneNumberField.objects.all()) == 3
@@ -503,7 +575,7 @@ def test_phone_number_field_type(data_fixture):
 
 @pytest.mark.django_db
 def test_human_readable_values(data_fixture):
-    table, user, row, blank_row = setup_interesting_test_table(data_fixture)
+    table, user, row, blank_row, context = setup_interesting_test_table(data_fixture)
     model = table.get_model()
     results = {}
     blank_results = {}
@@ -517,45 +589,358 @@ def test_human_readable_values(data_fixture):
         )
         blank_results[field["field"].name] = blank_value
 
-    assert blank_results == {
+    blank_expected = {
         "boolean": "False",
         "date_eu": "",
         "date_us": "",
         "datetime_eu": "",
         "datetime_us": "",
+        "datetime_eu_tzone_visible": "",
+        "datetime_eu_tzone_hidden": "",
+        "last_modified_date_eu": "02/01/2021",
+        "last_modified_date_us": "01/02/2021",
+        "last_modified_datetime_eu": "02/01/2021 12:00",
+        "last_modified_datetime_us": "01/02/2021 12:00",
+        "last_modified_datetime_eu_tzone": "02/01/2021 13:00",
+        "created_on_date_eu": "02/01/2021",
+        "created_on_date_us": "01/02/2021",
+        "created_on_datetime_eu": "02/01/2021 12:00",
+        "created_on_datetime_us": "01/02/2021 12:00",
+        "created_on_datetime_eu_tzone": "02/01/2021 13:00",
         "decimal_link_row": "",
         "email": "",
         "file": "",
         "file_link_row": "",
         "link_row": "",
+        "link_row_without_related": "",
         "long_text": "",
         "negative_decimal": "",
         "negative_int": "",
         "phone_number": "",
         "positive_decimal": "",
         "positive_int": "",
+        "rating": "0",
+        "self_link_row": "",
         "single_select": "",
+        "multiple_select": "",
+        "multiple_collaborators": "",
+        "multiple_collaborators_link_row": "",
         "text": "",
         "url": "",
+        "formula_bool": "True",
+        "formula_date": "2020-01-01",
+        "formula_dateinterval": "1d 0:00",
+        "formula_decimal": "33.3333333333",
+        "formula_email": "",
+        "formula_int": "1",
+        "formula_singleselect": "",
+        "formula_text": "test FORMULA",
+        "formula_link_url_only": "https://google.com",
+        "formula_link_with_label": "label (https://google.com)",
+        "formula_multipleselect": "",
+        "formula_multiple_collaborators": "",
+        "lookup": "",
+        "multiple_collaborators_lookup": "",
+        "autonumber": "1",
+        "duration_rollup_sum": "0:00",
+        "duration_rollup_avg": "0:00",
     }
-    assert results == {
+
+    for key, value in blank_expected.items():
+        assert blank_results[key] == value, (key, blank_results[key], value)
+
+    expected = {
         "boolean": "True",
         "date_eu": "01/02/2020",
         "date_us": "02/01/2020",
         "datetime_eu": "01/02/2020 01:23",
         "datetime_us": "02/01/2020 01:23",
+        "datetime_eu_tzone_visible": "01/02/2020 02:23",
+        "datetime_eu_tzone_hidden": "01/02/2020 02:23",
+        "last_modified_date_eu": "02/01/2021",
+        "last_modified_date_us": "01/02/2021",
+        "last_modified_datetime_eu": "02/01/2021 12:00",
+        "last_modified_datetime_us": "01/02/2021 12:00",
+        "last_modified_datetime_eu_tzone": "02/01/2021 13:00",
+        "created_on_date_eu": "02/01/2021",
+        "created_on_date_us": "01/02/2021",
+        "created_on_datetime_eu": "02/01/2021 12:00",
+        "created_on_datetime_us": "01/02/2021 12:00",
+        "created_on_datetime_eu_tzone": "02/01/2021 13:00",
         "decimal_link_row": "1.234, -123.456, unnamed row 3",
         "email": "test@example.com",
         "file": "a.txt, b.txt",
         "file_link_row": "name.txt, unnamed row 2",
-        "link_row": "linked_row_1, linked_row_2, unnamed row 3",
+        "link_row": "linked_row_1, linked_row_2, ",
         "long_text": "long_text",
         "negative_decimal": "-1.2",
         "negative_int": "-1",
         "phone_number": "+4412345678",
         "positive_decimal": "1.2",
         "positive_int": "1",
+        "rating": "3",
+        "self_link_row": "unnamed row 1",
+        "link_row_without_related": "linked_row_1, linked_row_2",
         "single_select": "A",
+        "multiple_select": "D, C, E",
+        "multiple_collaborators": "User2 <user2@example.com>, User3 <user3@example.com>",
+        "multiple_collaborators_link_row": "User2 <user2@example.com>, User3 <user3@example.com>, User2 <user2@example.com>",
         "text": "text",
         "url": "https://www.google.com",
+        "formula_bool": "True",
+        "formula_date": "2020-01-01",
+        "formula_dateinterval": "1d 0:00",
+        "formula_decimal": "33.3333333333",
+        "formula_email": "test@example.com",
+        "formula_int": "1",
+        "formula_singleselect": "A",
+        "formula_text": "test FORMULA",
+        "formula_link_url_only": "https://google.com",
+        "formula_link_with_label": "label (https://google.com)",
+        "formula_multipleselect": "C, D, E",
+        "formula_multiple_collaborators": "User2 <user2@example.com>, User3 <user3@example.com>",
+        "lookup": "linked_row_1, linked_row_2, ",
+        "multiple_collaborators_lookup": "User2 <user2@example.com>, User3 <user3@example.com>, User2 <user2@example.com>",
+        "autonumber": "2",
+        "duration_rollup_sum": "0:04",
+        "duration_rollup_avg": "0:02",
     }
+
+    for key, value in expected.items():
+        assert results[key] == value, (key, results[key], value)
+
+
+@pytest.mark.django_db
+def test_import_export_lookup_field(data_fixture, api_client):
+    user, token = data_fixture.create_user_and_token()
+    table_a, table_b, link_field = data_fixture.create_two_linked_tables(user=user)
+
+    target_field = data_fixture.create_text_field(name="target", table=table_b)
+    table_a_model = table_a.get_model(attribute_names=True)
+    table_b_model = table_b.get_model(attribute_names=True)
+    row_1 = table_b_model.objects.create(primary="1", target="target 1")
+    row_2 = table_b_model.objects.create(primary="2", target="target 2")
+
+    row_a = table_a_model.objects.create(primary="a")
+    row_a.link.add(row_1.id)
+    row_a.link.add(row_2.id)
+    row_a.save()
+
+    lookup = FieldHandler().create_field(
+        user,
+        table_a,
+        "lookup",
+        name="lookup",
+        through_field_name="link",
+        target_field_name="target",
+    )
+    lookup_field_type = field_type_registry.get_by_model(lookup)
+    lookup_serialized = lookup_field_type.export_serialized(lookup)
+    assert lookup_serialized["target_field_id"] == target_field.id
+    assert lookup_serialized["target_field_name"] == target_field.name
+    assert lookup_serialized["through_field_id"] == link_field.id
+    assert lookup_serialized["through_field_name"] == link_field.name
+
+    id_mapping = {
+        "database_fields": {
+            link_field.id: link_field.id,
+            target_field.id: target_field.id,
+        }
+    }
+
+    lookup.name = "rename to prevent import clash"
+    lookup.save()
+
+    deferred_field_fk_updater = DeferredForeignKeyUpdater()
+    lookup_field_imported = lookup_field_type.import_serialized(
+        table_a,
+        lookup_serialized,
+        ImportExportConfig(include_permission_data=True),
+        id_mapping,
+        deferred_field_fk_updater,
+    )
+    assert lookup.id != lookup_field_imported.id
+    assert lookup_field_imported.name == "lookup"
+    assert lookup_field_imported.order == lookup.order
+    assert lookup_field_imported.primary == lookup.primary
+    assert lookup_field_imported.formula == lookup.formula
+    assert lookup_field_imported.through_field is None
+    assert lookup_field_imported.target_field is None
+    assert lookup_field_imported.through_field_name == lookup.through_field_name
+    assert lookup_field_imported.target_field_name == lookup.target_field_name
+
+    deferred_field_fk_updater.run_deferred_fk_updates(id_mapping, "database_fields")
+    lookup_field_imported.refresh_from_db()
+    assert lookup_field_imported.through_field == lookup.through_field
+    assert lookup_field_imported.target_field == lookup.target_field
+    assert lookup_field_imported.through_field_name == lookup.through_field_name
+    assert lookup_field_imported.target_field_name == lookup.target_field_name
+
+    assert id_mapping["database_fields"][lookup.id] == lookup_field_imported.id
+
+
+@pytest.mark.django_db
+def test_lookup_field_get_field_dependencies_import_serialized_broken_lookup(
+    data_fixture,
+):
+    user, token = data_fixture.create_user_and_token()
+    table_a, table_b, link_field = data_fixture.create_two_linked_tables(user=user)
+    target_field = data_fixture.create_text_field(name="target", table=table_b)
+    lookup_field = FieldHandler().create_field(
+        user,
+        table_a,
+        "lookup",
+        name="lookup",
+        through_field_name="link",
+        target_field_name="target",
+    )
+
+    serialized_field = LookupFieldType().export_serialized(lookup_field)
+    serialized_fields_map = {
+        link_field.id: LinkRowFieldType().export_serialized(link_field),
+        target_field.id: TextFieldType().export_serialized(target_field),
+    }
+    primary_table_fields_map = {}
+
+    # the dependencies are listed normally when lookup is valid
+    field_deps = LookupFieldType().get_field_depdendencies_before_import_serialized(
+        serialized_field, serialized_fields_map, primary_table_fields_map
+    )
+    assert field_deps == set(
+        [
+            (
+                "target",
+                "link",
+            ),
+        ]
+    )
+
+    # lookup is broken
+    FieldHandler().delete_field(user, link_field)
+    lookup_field.refresh_from_db()
+
+    serialized_field = LookupFieldType().export_serialized(lookup_field)
+    serialized_fields_map = {
+        link_field.id: LinkRowFieldType().export_serialized(link_field),
+        target_field.id: TextFieldType().export_serialized(target_field),
+    }
+    primary_table_fields_map = {}
+
+    field_deps = LookupFieldType().get_field_depdendencies_before_import_serialized(
+        serialized_field, serialized_fields_map, primary_table_fields_map
+    )
+    assert field_deps is None
+
+
+def test_field_types_with_get_order_have_get_value_for_filter():
+    for field_type in field_type_registry.get_all():
+        if field_type.__class__.get_order.__code__ is not FieldType.get_order.__code__:
+            assert (
+                field_type.__class__.get_value_for_filter.__code__
+                is not FieldType.get_value_for_filter.__code__
+            )
+
+
+def test_field_types_with_get_value_for_filter_have_get_order():
+    for field_type in field_type_registry.get_all():
+        if (
+            field_type.__class__.get_value_for_filter.__code__
+            is not FieldType.get_value_for_filter.__code__
+        ):
+            assert (
+                field_type.__class__.get_order.__code__
+                is not FieldType.get_order.__code__
+            )
+
+
+@pytest.mark.django_db
+def test_text_field_type_get_order(data_fixture):
+    user = data_fixture.create_user()
+    table = data_fixture.create_database_table(user=user)
+    field = data_fixture.create_text_field(table=table)
+    model = table.get_model()
+
+    dir_path = os.path.dirname(os.path.realpath(__file__))
+    with open(
+        dir_path + "/../../../../../../tests/all_chars.txt", mode="r", encoding="utf-8"
+    ) as f:
+        all_chars = f.read()
+    with open(
+        dir_path + "/../../../../../../tests/sorted_chars.txt",
+        mode="r",
+        encoding="utf-8",
+    ) as f:
+        sorted_chars = f.read()
+
+    model.objects.bulk_create(
+        [model(**{f"field_{field.id}": char}) for char in all_chars]
+    )
+
+    queryset = model.objects.all().order_by_fields_string(f"field_{field.id}")
+    result = ""
+    for char in queryset:
+        result += getattr(char, f"field_{field.id}")
+
+    assert result == sorted_chars
+
+
+@pytest.mark.django_db
+@override_settings(USE_PG_FULLTEXT_SEARCH=False)
+def test_tsv_not_created(data_fixture):
+    id_mapping = {}
+
+    table = data_fixture.create_database_table(force_add_tsvectors=False)
+    text_field = data_fixture.create_text_field(
+        name="Text name", text_default="Text default", table=table
+    )
+    text_field_type = field_type_registry.get_by_model(text_field)
+    text_serialized = text_field_type.export_serialized(text_field)
+    text_field_imported = text_field_type.import_serialized(
+        table,
+        text_serialized,
+        ImportExportConfig(include_permission_data=True, reduce_disk_space_usage=False),
+        id_mapping,
+        DeferredForeignKeyUpdater(),
+    )
+    assert text_field_imported.tsvector_column_created is False
+
+
+@pytest.mark.django_db
+@pytest.mark.field_link_row
+def test_field_type_prepare_db_value_with_invalid_values(data_fixture):
+    user = data_fixture.create_user()
+    database = data_fixture.create_database_application(user=user, name="Placeholder")
+    table = data_fixture.create_database_table(name="Example", database=database)
+    field_handler = FieldHandler()
+    # those fields require additional configuration or accept any text
+    # so they are not suitable for this test
+    excluded = ["ai", "text", "long_text", "boolean", "link_row", "password"]
+
+    test_payload = "invalid---"
+
+    for field_type in [
+        f
+        for f in field_type_registry.get_all()
+        if not f.read_only and f.type not in excluded
+    ]:
+        field_type_name = field_type.type
+        field_name = f"Field {field_type_name}"
+        field = field_handler.create_field(
+            user=user,
+            table=table,
+            type_name=field_type.type,
+            name=field_name,
+        )
+
+        with pytest.raises(ValidationError):
+            field_type.prepare_value_for_db(field, test_payload)
+
+
+@pytest.mark.parametrize("field_type", field_type_registry.get_all())
+def test_field_type_check_can_filter_by(field_type):
+    compatible_view_filters = [
+        vft
+        for vft in view_filter_type_registry.get_all()
+        if field_type.type in vft.compatible_field_types
+    ]
+    assert field_type.check_can_filter_by(Mock()) == (len(compatible_view_filters) > 0)

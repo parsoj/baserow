@@ -1,20 +1,31 @@
-from django.db.models import Q
-from django.utils import timezone
+from typing import List, Union
 
 from rest_framework.request import Request
 
-from baserow.core.utils import random_string
-from baserow.contrib.database.models import Database, Table
 from baserow.contrib.database.exceptions import DatabaseDoesNotBelongToGroup
+from baserow.contrib.database.models import Database, Table
 from baserow.contrib.database.table.exceptions import TableDoesNotBelongToGroup
+from baserow.contrib.database.tokens.constants import (
+    TOKEN_OPERATION_TYPES,
+    TOKEN_TO_OPERATION_MAP,
+)
+from baserow.core.handler import CoreHandler
+from baserow.core.registries import object_scope_type_registry
+from baserow.core.types import PermissionCheck
+from baserow.core.utils import random_string
 
 from .exceptions import (
-    TokenDoesNotExist,
     MaximumUniqueTokenTriesError,
-    TokenDoesNotBelongToUser,
     NoPermissionToTable,
+    TokenDoesNotBelongToUser,
+    TokenDoesNotExist,
 )
 from .models import Token, TokenPermission
+from .operations import (
+    CreateTokenOperationType,
+    ReadTokenOperationType,
+    UseTokenOperationType,
+)
 
 
 class TokenHandler:
@@ -31,7 +42,7 @@ class TokenHandler:
         """
 
         try:
-            token = Token.objects.select_related("group").get(key=key)
+            token = Token.objects.select_related("workspace", "user").get(key=key)
         except Token.DoesNotExist:
             raise TokenDoesNotExist(f"The token with key {key} does not exist.")
 
@@ -39,7 +50,7 @@ class TokenHandler:
 
     def get_token(self, user, token_id, base_queryset=None):
         """
-        Fetches a single token and checks if the user belongs to the group.
+        Fetches a single token and checks if the user belongs to the workspace.
 
         :param user: The user on whose behalf the token is requested.
         :type user: User
@@ -54,16 +65,20 @@ class TokenHandler:
         :rtype: Token
         """
 
-        if not base_queryset:
+        if base_queryset is None:
             base_queryset = Token.objects
 
         try:
-            token = base_queryset.select_related("group").get(id=token_id, user=user)
+            token = base_queryset.select_related("workspace").get(
+                id=token_id, user=user
+            )
         except Token.DoesNotExist:
             raise TokenDoesNotExist(f"The token with id {token_id} does not exist.")
 
-        group = token.group
-        group.has_user(user, raise_error=True)
+        workspace = token.workspace
+        CoreHandler().check_permissions(
+            user, ReadTokenOperationType.type, workspace=workspace, context=token
+        )
 
         return token
 
@@ -97,27 +112,29 @@ class TokenHandler:
             if not Token.objects.filter(key=token).exists():
                 return token
 
-    def create_token(self, user, group, name):
+    def create_token(self, user, workspace, name):
         """
         Creates a new API token.
 
         :param user: The user of whose behalf the token is created.
         :type user: User
-        :param group: The group object of which the token is related to.
-        :type group: Group
+        :param workspace: The workspace object of which the token is related to.
+        :type workspace: Workspace
         :param name: The name of the token.
         :type name: str
         :return: The created token instance.
         :rtype: Token
         """
 
-        group.has_user(user, raise_error=True)
-
-        token = Token.objects.create(
-            name=name, key=self.generate_unique_key(), user=user, group=group
+        CoreHandler().check_permissions(
+            user, CreateTokenOperationType.type, workspace=workspace, context=workspace
         )
 
-        # The newly created token should have access to all the tables in the group
+        token = Token.objects.create(
+            name=name, key=self.generate_unique_key(), user=user, workspace=workspace
+        )
+
+        # The newly created token should have access to all the tables in the workspace
         # when it is created.
         self.update_token_permissions(
             user, token, create=True, read=True, update=True, delete=True
@@ -192,56 +209,82 @@ class TokenHandler:
         )
 
         * Gives create row permissions to all tables in database 1 and to table 10.
-        * Gives read permissions to all tables in the token's group.
+        * Gives read permissions to all tables in the token's workspace.
         * Doesn't give permissions to update any row in all the tables related to the
-          token's group.
+          token's workspace.
         * Doesn't give permissions to delete any row in all the tables related to the
-          token's group.
+          token's workspace.
 
         :param user: The user on whose behalf the permissions are updated.
         :type user: User
         :param token: The token for which the permissions need to be updated.
         :type token: Token
         :param create: Indicates for which tables the token can create rows. True
-            indicates all tables in the group, a database indicates all tables in the
-            provided databases and a table indicates only that table. Multiple values
-            can be provided in a list.
+            indicates all tables in the workspace, a database indicates all tables in
+            the provided databases and a table indicates only that table. Multiple
+            values can be provided in a list.
         :type create: list, bool or none
         :param read: Indicates for which tables the token can list and get rows. True
-            indicates all tables in the group, a database indicates all tables in the
-            provided databases and a table indicates only that table. Multiple values
-            can be provided in a list.
+            indicates all tables in the workspace, a database indicates all tables in
+            the provided databases and a table indicates only that table. Multiple
+            values can be provided in a list.
         :type read: list, bool or none
         :param update: Indicates for which tables the token can update rows. True
-            indicates all tables in the group, a database indicates all tables in the
-            provided databases and a table indicates only that table. Multiple values
-            can be provided in a list.
+            indicates all tables in the workspace, a database indicates all tables in
+            the provided databases and a table indicates only that table. Multiple
+            values can be provided in a list.
         :type update: list, bool or none
         :param delete: Indicates for which tables the token can delete rows. True
-            indicates all tables in the group, a database indicates all tables in the
-            provided databases and a table indicates only that table. Multiple values
-            can be provided in a list.
+            indicates all tables in the workspace, a database indicates all tables in
+            the provided databases and a table indicates only that table. Multiple
+            values can be provided in a list.
         :type delete: list, bool or none
         :raises DatabaseDoesNotBelongToGroup: If a provided database instance does not
-            belong to the token's group.
+            belong to the token's workspace.
         :raises TableDoesNotBelongToGroup: If a provided table instance does not
-            belong to the token's group.
+            belong to the token's workspace.
         :raises TokenDoesNotBelongToUser: When the provided token does not belong the
             provided user.
         """
 
         if not user.id == token.user_id:
             raise TokenDoesNotBelongToUser(
-                "The user is not authorized to delete the " "token."
+                "The user is not authorized to delete the token."
             )
+
+        table_scope_type = object_scope_type_registry.get("database_table")
+
+        # Does the user have the permissions to perform these operations?
+        for object_list, token_action in [
+            (create, "create"),
+            (read, "read"),
+            (update, "update"),
+            (delete, "delete"),
+        ]:
+            # Only check permission for tables so ignoring non list type (True or False)
+            # and select only database_table objects
+            # We can't check the permission at workspace and database level because it
+            # just means that all underlying tables are affected but only those
+            # already visible by the user. It's not a security check. The security
+            # check is done in the corresponding API endpoint.
+            if isinstance(object_list, list):
+                all_tables = [
+                    obj for obj in object_list if table_scope_type.contains(obj)
+                ]
+                for table in all_tables:
+                    CoreHandler().check_permissions(
+                        user,
+                        TOKEN_TO_OPERATION_MAP[token_action],
+                        workspace=token.workspace,
+                        context=table,
+                    )
 
         existing_permissions = token.tokenpermission_set.all()
         desired_permissions = []
-        types = ["create", "read", "update", "delete"]
 
         # Create a list of desired tokens based on the provided create, read, update
         # and delete parameters.
-        for type_name in types:
+        for type_name in TOKEN_OPERATION_TYPES:
             value = locals()[type_name]
 
             if value is True:
@@ -249,10 +292,10 @@ class TokenHandler:
             elif isinstance(value, list):
                 for instance in value:
                     if isinstance(instance, Database):
-                        if instance.group_id != token.group_id:
+                        if instance.workspace_id != token.workspace_id:
                             raise DatabaseDoesNotBelongToGroup(
                                 f"The database {instance.id} does not belong to the "
-                                f"token's group."
+                                f"token's workspace."
                             )
 
                         desired_permissions.append(
@@ -261,10 +304,10 @@ class TokenHandler:
                             )
                         )
                     elif isinstance(instance, Table):
-                        if instance.database.group_id != token.group_id:
+                        if instance.database.workspace_id != token.workspace_id:
                             raise TableDoesNotBelongToGroup(
                                 f"The table {instance.id} does not belong to the "
-                                f"token's group."
+                                f"token's workspace."
                             )
 
                         desired_permissions.append(
@@ -309,45 +352,84 @@ class TokenHandler:
         if len(to_create) > 0:
             TokenPermission.objects.bulk_create(to_create)
 
-    def has_table_permission(self, token, type_name, table):
+    def has_table_permission(
+        self, token: Token, type_name: Union[str, List[str]], table: Table
+    ) -> bool:
         """
         Checks if the provided token has access to perform an operation on the provided
         table.
 
         :param token: The token instance.
-        :type token: Token
         :param type_name: The CRUD operation, create, read, update or delete to check
             the permissions for. Can be a list if you want to check at least one of the
             listed operation.
-        :type type_name: str | list
         :param table: The table object to check the permissions for.
-        :type table: Table
         :return: Indicates if the token has permissions to perform the operation on
             the provided table.
-        :rtype: bool
         """
 
-        if token.group_id != table.database.group_id:
+        if token.workspace_id != table.database.workspace_id:
             return False
 
-        if not table.database.group.has_user(token.user):
+        # First check the user has the permission to use the token
+        if not CoreHandler().check_permissions(
+            token.user,
+            UseTokenOperationType.type,
+            workspace=token.workspace,
+            context=token,
+        ):
             return False
 
-        if isinstance(type_name, str):
-            type_names = [type_name]
-        else:
-            type_names = type_name
+        type_names = type_name if isinstance(type_name, list) else [type_name]
 
-        return TokenPermission.objects.filter(
-            Q(database__table=table)
-            | Q(table_id=table.id)
-            | Q(table__isnull=True, database__isnull=True),
-            token=token,
-            type__in=type_names,
-        ).exists()
+        checks = [
+            PermissionCheck(token, TOKEN_TO_OPERATION_MAP[token_operation], table)
+            for token_operation in type_names
+            if token_operation in TOKEN_TO_OPERATION_MAP
+        ]
+
+        token_permission = CoreHandler().check_multiple_permissions(
+            checks, token.workspace
+        )
+
+        # At least one must be True
+        return any([v is True for v in token_permission.values()])
+
+    def get_token_from_request(self, request: Request) -> Token | None:
+        """
+        Extracts the token from the request. If the token is not found then None is
+        returned.
+
+        :param request: The request from which the token must be extracted.
+        :return: The extracted token or None if it could not be found.
+        """
+
+        return getattr(request, "user_token", None)
+
+    def raise_table_permission_error(self, table: Table, type_name: str | list[str]):
+        """
+        Raises an exception indicating that the provided token does not have permission
+        to the provided table. Used to raise a consistent exception when the token does
+        not have permission to the table.
+
+        :param table: The table object to check the permissions for.
+        :param type_name: The CRUD operation, create, read, update or delete to check
+            the permissions for. Can be a list if you want to check at least one of the
+            listed operation.
+        :raises NoPermissionToTable: Raised when the token does not have permissions to
+        """
+
+        raise NoPermissionToTable(
+            f"The provided token does not have {type_name} "
+            f"permissions to table {table.id}."
+        )
 
     def check_table_permissions(
-        self, request_or_token, type_name, table, force_check=False
+        self,
+        request_or_token: Request | Token,
+        type_name: str | list[str],
+        table: Table,
+        force_check=False,
     ):
         """
         Instead of returning True or False, this method will raise an exception if the
@@ -355,51 +437,34 @@ class TokenHandler:
 
         :param request_or_token: If a request is provided then the token will be
             extracted from the request. Otherwise a token object is expected.
-        :type request_or_token: Request or Token
         :param type_name: The CRUD operation, create, read, update or delete to check
             the permissions for. Can be a list if you want to check at least one of the
             listed operation.
-        :type type_name: str | list
         :param table: The table object to check the permissions for.
-        :type table: Table
         :param force_check: Indicates if a NoPermissionToTable exception must be raised
             when the token could not be extracted from the request. This can be
             useful if a view accepts multiple types of authentication.
-        :type force_check: bool
         :raises ValueError: when neither a Token or HttpRequest is provided.
         :raises NoPermissionToTable: when the token does not have permissions to the
             table.
         """
 
         token = None
-
-        if not isinstance(request_or_token, Request) and not isinstance(
-            request_or_token, Token
-        ):
-            raise ValueError(
-                "The provided instance should be a HttpRequest or Token " "object."
-            )
-
-        if isinstance(request_or_token, Request) and hasattr(
-            request_or_token, "user_token"
-        ):
-            token = request_or_token.user_token
-
         if isinstance(request_or_token, Token):
             token = request_or_token
-
-        if not token and not force_check:
-            return
-
-        if (
-            not token
-            and force_check
-            or not TokenHandler().has_table_permission(token, type_name, table)
-        ):
-            raise NoPermissionToTable(
-                f"The provided token does not have {type_name} "
-                f"permissions to table {table.id}."
+        elif isinstance(request_or_token, Request):
+            token = self.get_token_from_request(request_or_token)
+        else:
+            raise ValueError(
+                "The provided instance should be a HttpRequest or Token object."
             )
+
+        should_check_permissions = token is not None or force_check
+        has_table_permissions = token is not None and self.has_table_permission(
+            token, type_name, table
+        )
+        if should_check_permissions and not has_table_permissions:
+            self.raise_table_permission_error(table, type_name)
 
     def delete_token(self, user, token):
         """
@@ -419,20 +484,3 @@ class TokenHandler:
             )
 
         token.delete()
-
-    def update_token_usage(self, token):
-        """
-        Increases the amount of handled calls and updates the last call timestamp of
-        the token.
-
-        :param token: The token instance that needs to be updated.
-        :param token: Token
-        :return: The updated token instance.
-        :rtype: Token
-        """
-
-        token.handled_calls += 1
-        token.last_call = timezone.now()
-        token.save()
-
-        return token

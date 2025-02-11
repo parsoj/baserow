@@ -1,50 +1,82 @@
-from django.db import models
+import secrets
+import uuid
+from datetime import datetime, timezone
+from functools import lru_cache
+
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.contenttypes.models import ContentType
+from django.contrib.postgres.fields import ArrayField
+from django.db import models
+from django.db.models import Q, QuerySet, UniqueConstraint
+from django.db.models.manager import BaseManager
 
-from rest_framework.exceptions import NotAuthenticated
-
+from baserow.core.jobs.mixins import (
+    JobWithUndoRedoIds,
+    JobWithUserIpAddress,
+    JobWithWebsocketId,
+)
+from baserow.core.jobs.models import Job
 from baserow.core.user_files.models import UserFile
 
+from .action.models import Action
+from .integrations.models import Integration
 from .mixins import (
-    OrderableMixin,
-    PolymorphicContentTypeMixin,
     CreatedAndUpdatedOnMixin,
+    HierarchicalModelMixin,
+    OrderableMixin,
+    ParentWorkspaceTrashableModelMixin,
+    PolymorphicContentTypeMixin,
     TrashableModelMixin,
-    ParentGroupTrashableModelMixin,
+    WithRegistry,
 )
-from .exceptions import UserNotInGroup, UserInvalidGroupPermissionsError
-
+from .notifications.models import Notification
+from .services.models import Service
 
 __all__ = [
     "Settings",
-    "Group",
-    "GroupUser",
-    "GroupInvitation",
+    "Workspace",
+    "WorkspaceUser",
+    "WorkspaceInvitation",
     "Application",
     "TemplateCategory",
     "Template",
     "UserLogEntry",
     "TrashEntry",
     "UserFile",
+    "Action",
+    "Snapshot",
+    "DuplicateApplicationJob",
+    "InstallTemplateJob",
+    "Integration",
+    "Service",
+    "Notification",
+    "BlacklistedToken",
+    "ExportApplicationsJob",
+    "ImportApplicationsJob",
+    "ImportExportResource",
+    "ImportExportTrustedSource",
 ]
-
 
 User = get_user_model()
 
 
 # The difference between an admin and member right now is that an admin has
-# permissions to update, delete and manage the members of a group.
-GROUP_USER_PERMISSION_ADMIN = "ADMIN"
-GROUP_USER_PERMISSION_MEMBER = "MEMBER"
-GROUP_USER_PERMISSION_CHOICES = (
-    (GROUP_USER_PERMISSION_ADMIN, "Admin"),
-    (GROUP_USER_PERMISSION_MEMBER, "Member"),
-)
+# permissions to update, delete and manage the members of a workspace.
+WORKSPACE_USER_PERMISSION_ADMIN = "ADMIN"
+WORKSPACE_USER_PERMISSION_MEMBER = "MEMBER"
 
 
 def get_default_application_content_type():
     return ContentType.objects.get_for_model(Application)
+
+
+class Operation(models.Model):
+    """
+    An operation
+    """
+
+    name = models.CharField(max_length=255, unique=True)
 
 
 class Settings(models.Model):
@@ -53,96 +85,230 @@ class Settings(models.Model):
     change. This table can only contain a single row.
     """
 
+    # Keep these in sync with the web-frontend options in
+    # web-frontend/modules/core/enums.js
+    class EmailVerificationOptions(models.TextChoices):
+        NO_VERIFICATION = "no_verification", "no_verification"
+        RECOMMENDED = "recommended", "recommended"
+        ENFORCED = "enforced", "enforced"
+
+    instance_id = models.SlugField(default=secrets.token_urlsafe)
     allow_new_signups = models.BooleanField(
         default=True,
         help_text="Indicates whether new users can create a new account when signing "
         "up.",
     )
+    allow_signups_via_workspace_invitations = models.BooleanField(
+        default=True,
+        help_text="Indicates whether invited users can create an account when signing "
+        "up, even if allow_new_signups is disabled.",
+    )
+    allow_reset_password = models.BooleanField(
+        default=True,
+        help_text="Indicates whether users can request a password reset link.",
+    )
+    allow_global_workspace_creation = models.BooleanField(
+        default=True,
+        help_text="Indicates whether all users can create workspaces, or just staff.",
+    )
+    account_deletion_grace_delay = models.PositiveSmallIntegerField(
+        default=30,
+        help_text=(
+            "Number of days after the last login for an account pending deletion "
+            "to be deleted"
+        ),
+    )
+    show_admin_signup_page = models.BooleanField(
+        default=True,
+        help_text="Indicates that there are no admin users in the database yet, "
+        "so in the frontend the signup form will be shown instead of the login page.",
+    )
+    track_workspace_usage = models.BooleanField(
+        default=False,
+        help_text="Runs a job once per day which calculates per workspace row counts "
+        "and file storage usage, displayed on the admin workspace page.",
+    )
+    show_baserow_help_request = models.BooleanField(
+        default=True,
+        help_text=(
+            "Indicates whether the `We need your help!` message will be shown on the "
+            "dashboard"
+        ),
+    )
+    co_branding_logo = models.ForeignKey(
+        UserFile,
+        blank=True,
+        null=True,
+        on_delete=models.SET_NULL,
+        related_name="+",
+        help_text="Co-branding logo that's placed next to the Baserow logo (176x29).",
+    )
+    # TODO Remove null=True in a future release.
+    email_verification = models.TextField(
+        max_length=16,
+        null=True,
+        choices=EmailVerificationOptions.choices,
+        default=EmailVerificationOptions.NO_VERIFICATION,
+        help_text="Controls whether user email addresses have to be verified.",
+    )
+    verify_import_signature = models.BooleanField(
+        default=True,
+        db_default=True,
+        help_text="Indicates whether the signature of imported files should be verified.",
+    )
 
 
-class Group(TrashableModelMixin, CreatedAndUpdatedOnMixin):
-    name = models.CharField(max_length=100)
-    users = models.ManyToManyField(User, through="GroupUser")
+class UserProfile(models.Model):
+    """
+    User profile to store user specific information that can't be stored in
+    default user model.
+    """
+
+    # Keep these in sync with the web-frontend options in
+    # web-frontend/modules/core/enums.js
+    class EmailNotificationFrequencyOptions(models.TextChoices):
+        INSTANT = "instant", "instant"
+        DAILY = "daily", "daily"
+        WEEKLY = "weekly", "weekly"
+        NEVER = "never", "never"
+
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="profile")
+    language = models.TextField(
+        max_length=10,
+        choices=settings.LANGUAGES,
+        default=settings.LANGUAGE_CODE,
+        help_text="An ISO 639 language code (with optional variant) "
+        "selected by the user. Ex: en-GB.",
+    )
+    to_be_deleted = models.BooleanField(
+        default=False,
+        help_text="True if the user is pending deletion. "
+        "An automatic task will delete the user after a grace delay.",
+    )
+    concurrency_limit = models.SmallIntegerField(
+        null=True,
+        default=None,
+        blank=True,
+        help_text="An optional per user concurrency limit.",
+    )
+    timezone = models.CharField(
+        max_length=255,
+        null=True,
+        help_text="The user timezone to use for dates and times.",
+    )
+    email_notification_frequency = models.TextField(
+        max_length=16,
+        choices=EmailNotificationFrequencyOptions.choices,
+        default=EmailNotificationFrequencyOptions.INSTANT,
+    )
+    last_notifications_email_sent_at = models.DateTimeField(
+        null=True,
+        default=None,
+        help_text="The last time an email notification was sent to the user.",
+    )
+    # This property is used to invalidate authentication tokens that were generated
+    # before this date.
+    last_password_change = models.DateTimeField(
+        null=True,
+        default=None,
+        help_text="Timestamp when the user changed their password.",
+    )
+    # TODO Remove null=True in a future release.
+    email_verified = models.BooleanField(null=True, default=False)
+    # TODO Remove null=True in a future release.
+    completed_onboarding = models.BooleanField(null=True, default=False)
+
+    def iat_before_last_password_change(self, iat: int) -> bool:
+        """
+        Returns whether the iat value of a token was generated before the last
+        password. This can be needed to invalidate the token if so.
+
+        :param iat: The unix in unit timestamp format to compare with the
+            `last_password_change`.
+        :return: Whether the iat was before the last password change.
+        """
+
+        if not self.last_password_change:
+            return False
+
+        iat = datetime.utcfromtimestamp(iat).replace(tzinfo=timezone.utc)
+        # We have to remove the milliseconds because the `iat` doesn't have
+        # milliseconds in the timestamp, so that can result in the
+        # `last_password_change` being higher, while it was actually done before the
+        # `iat` was generated.
+        last_password_change = self.last_password_change.replace(microsecond=0)
+        return last_password_change > iat
+
+    def is_jwt_token_valid(self, token):
+        return not self.iat_before_last_password_change(token["iat"])
+
+
+class BlacklistedToken(CreatedAndUpdatedOnMixin, models.Model):
+    hashed_token = models.CharField(max_length=64, db_index=True, unique=True)
+    expires_at = models.DateTimeField()
+
+
+class Workspace(HierarchicalModelMixin, TrashableModelMixin, CreatedAndUpdatedOnMixin):
+    name = models.CharField(max_length=165)
+    users = models.ManyToManyField(User, through="WorkspaceUser")
+    storage_usage = models.IntegerField(null=True)
+    storage_usage_updated_at = models.DateTimeField(null=True)
+    seats_taken = models.IntegerField(null=True)
+    seats_taken_updated_at = models.DateTimeField(null=True)
+    now = models.DateTimeField(null=True)
+    generative_ai_models_settings = models.JSONField(default=dict, null=True)
+
+    def get_parent(self):
+        return None
+
+    def refresh_now(self):
+        self.now = datetime.now(tz=timezone.utc)
+        self.save(update_fields=["now"])
+
+    def get_now_or_set_if_null(self):
+        if self.now is None:
+            self.refresh_now()
+        return self.now
 
     def application_set_including_trash(self):
         """
-        :return: The applications for this group including any trashed applications.
+        :return: The applications for this workspace including any trashed applications.
         """
+
         return self.application_set(manager="objects_and_trash")
 
+    @lru_cache
     def has_template(self):
         return self.template_set.all().exists()
 
-    def has_user(
-        self,
-        user,
-        permissions=None,
-        raise_error=False,
-        allow_if_template=False,
-        include_trash=False,
-    ):
+    def get_workspace_user(
+        self, user: User, include_trash: bool = False
+    ) -> "WorkspaceUser":
         """
-        Checks if the provided user belongs to the group.
+        Return the WorkspaceUser object for this workspace for the specified user.
 
-        :param user: The user that must be in the group.
-        :type user: User
-        :param permissions: One or multiple permissions can optionally be provided
-            and if so, the user must have one of those permissions.
-        :type permissions: None, str or list
-        :param raise_error: If True an error will be raised when the user does not
-            belong to the group or doesn't have the right permissions.
-        :type raise_error: bool
-        :param allow_if_template: If true and if the group is related to a template,
-            then True is always returned and no exception will be raised.
-        :type allow_if_template: bool
-        :param include_trash: If true then also checks if the group has been trashed
-            instead of raising a DoesNotExist exception.
-        :type include_trash: bool
-        :raises UserNotInGroup: If the user does not belong to the group.
-        :raises UserInvalidGroupPermissionsError: If the user does belong to the group,
-            but doesn't have the right permissions.
-        :return: Indicates if the user belongs to the group.
-        :rtype: bool
+        :param user: The user we want the workspace user for.
+        :param include_trash: Do we want to check trashed workspace user also ?
+        :return: The related workspace user instance.
         """
-
-        if permissions and not isinstance(permissions, list):
-            permissions = [permissions]
-
-        if allow_if_template and self.has_template():
-            return True
-        elif not bool(user and user.is_authenticated):
-            if raise_error:
-                raise NotAuthenticated()
-            else:
-                return False
 
         if include_trash:
-            manager = GroupUser.objects_and_trash
+            manager = WorkspaceUser.objects_and_trash
         else:
-            manager = GroupUser.objects
+            manager = WorkspaceUser.objects
 
-        queryset = manager.filter(user_id=user.id, group_id=self.id)
-
-        if raise_error:
-            try:
-                group_user = queryset.get()
-            except GroupUser.DoesNotExist:
-                raise UserNotInGroup(user, self)
-
-            if permissions is not None and group_user.permissions not in permissions:
-                raise UserInvalidGroupPermissionsError(user, self, permissions)
-        else:
-            if permissions is not None:
-                queryset = queryset.filter(permissions__in=permissions)
-
-            return queryset.exists()
+        return manager.get(user=user, workspace=self)
 
     def __str__(self):
-        return f"<Group id={self.id}, name={self.name}>"
+        return f"<Workspace id={self.id}, name={self.name}>"
+
+    def __repr__(self):
+        return f"<Workspace id={self.id}, name={self.name}>"
 
 
-class GroupUser(
-    ParentGroupTrashableModelMixin,
+class WorkspaceUser(
+    HierarchicalModelMixin,
+    ParentWorkspaceTrashableModelMixin,
     CreatedAndUpdatedOnMixin,
     OrderableMixin,
     models.Model,
@@ -150,25 +316,27 @@ class GroupUser(
     user = models.ForeignKey(
         User,
         on_delete=models.CASCADE,
-        help_text="The user that has access to the group.",
+        help_text="The user that has access to the workspace.",
     )
-    group = models.ForeignKey(
-        Group,
+    workspace = models.ForeignKey(
+        Workspace,
         on_delete=models.CASCADE,
-        help_text="The group that the user has access to.",
+        help_text="The workspace that the user has access to.",
     )
     order = models.PositiveIntegerField(
-        help_text="Unique order that the group has for the user."
+        help_text="Unique order that the workspace has for the user."
     )
     permissions = models.CharField(
-        default=GROUP_USER_PERMISSION_MEMBER,
+        default=WORKSPACE_USER_PERMISSION_MEMBER,
         max_length=32,
-        choices=GROUP_USER_PERMISSION_CHOICES,
-        help_text="The permissions that the user has within the group.",
+        help_text="The permissions that the user has within the workspace.",
     )
 
+    def get_parent(self):
+        return self.workspace
+
     class Meta:
-        unique_together = [["user", "group"]]
+        unique_together = [["user", "workspace"]]
         ordering = ("order",)
 
     @classmethod
@@ -177,14 +345,17 @@ class GroupUser(
         return cls.get_highest_order_of_queryset(queryset) + 1
 
 
-class GroupInvitation(
-    ParentGroupTrashableModelMixin, CreatedAndUpdatedOnMixin, models.Model
+class WorkspaceInvitation(
+    HierarchicalModelMixin,
+    ParentWorkspaceTrashableModelMixin,
+    CreatedAndUpdatedOnMixin,
+    models.Model,
 ):
-    group = models.ForeignKey(
-        Group,
+    workspace = models.ForeignKey(
+        Workspace,
         on_delete=models.CASCADE,
-        help_text="The group that the user will get access to once the invitation is "
-        "accepted.",
+        help_text="The workspace that the user will get access to once the invitation "
+        "is accepted.",
     )
     invited_by = models.ForeignKey(
         User,
@@ -197,31 +368,37 @@ class GroupInvitation(
         "Only a user with that email address can accept it.",
     )
     permissions = models.CharField(
-        default=GROUP_USER_PERMISSION_MEMBER,
+        default=WORKSPACE_USER_PERMISSION_MEMBER,
         max_length=32,
-        choices=GROUP_USER_PERMISSION_CHOICES,
-        help_text="The permissions that the user is going to get within the group "
+        help_text="The permissions that the user is going to get within the workspace "
         "after accepting the invitation.",
     )
     message = models.TextField(
         blank=True,
+        max_length=250,
         help_text="An optional message that the invitor can provide. This will be "
         "visible to the receiver of the invitation.",
     )
 
+    def get_parent(self):
+        return self.workspace
+
     class Meta:
         ordering = ("id",)
+        unique_together = [["workspace", "email"]]
 
 
 class Application(
+    HierarchicalModelMixin,
     TrashableModelMixin,
     CreatedAndUpdatedOnMixin,
     OrderableMixin,
     PolymorphicContentTypeMixin,
+    WithRegistry,
     models.Model,
 ):
-    group = models.ForeignKey(Group, on_delete=models.CASCADE)
-    name = models.CharField(max_length=50)
+    workspace = models.ForeignKey(Workspace, on_delete=models.CASCADE, null=True)
+    name = models.CharField(max_length=160)
     order = models.PositiveIntegerField()
     content_type = models.ForeignKey(
         ContentType,
@@ -229,14 +406,33 @@ class Application(
         related_name="applications",
         on_delete=models.SET(get_default_application_content_type),
     )
+    installed_from_template = models.ForeignKey(
+        "Template",
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name="installed_applications",
+    )
 
     class Meta:
         ordering = ("order",)
 
+    @staticmethod
+    def get_type_registry():
+        from .registries import application_type_registry
+
+        return application_type_registry
+
     @classmethod
-    def get_last_order(cls, group):
-        queryset = Application.objects.filter(group=group)
+    def get_last_order(cls, workspace):
+        queryset = Application.objects.filter(workspace=workspace)
         return cls.get_highest_order_of_queryset(queryset) + 1
+
+    def get_parent(self):
+        if not self.workspace_id:
+            raise ValueError(
+                "Cannot call get_parent if workspace is None. Please check your hierarchy."
+            )
+        return self.workspace
 
 
 class TemplateCategory(models.Model):
@@ -254,12 +450,11 @@ class Template(models.Model):
     )
     icon = models.CharField(
         max_length=32,
-        help_text="The font awesome class name that can be used for displaying "
-        "purposes.",
+        help_text="The icon class name that can be used for displaying purposes.",
     )
     categories = models.ManyToManyField(TemplateCategory, related_name="templates")
-    group = models.ForeignKey(
-        Group,
+    workspace = models.ForeignKey(
+        Workspace,
         on_delete=models.SET_NULL,
         null=True,
         help_text="The group containing the applications related to the template. The "
@@ -280,6 +475,9 @@ class Template(models.Model):
 
     class Meta:
         ordering = ("name",)
+
+    def __str__(self):
+        return self.name
 
 
 class UserLogEntry(models.Model):
@@ -313,18 +511,25 @@ class TrashEntry(models.Model):
     # The actual id of the item that is trashed
     trash_item_id = models.PositiveIntegerField()
 
+    trash_item_owner = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name="private_trash_entries",
+    )
+
     # If the user who trashed something gets deleted we still wish to preserve this
     # trash record as it is independent of if the user exists or not.
     user_who_trashed = models.ForeignKey(
         User, on_delete=models.SET_NULL, null=True, blank=True
     )
 
-    # The group and application fields are used to group trash into separate "bins"
-    # which can be viewed and emptied independently of each other.
+    # The workspace and application fields are used to workspace trash into
+    # separate "bins" which can be viewed and emptied independently of each other.
 
-    # The group the item that is trashed is found in, if the trashed item is the
-    # group itself then this should also be set to that trashed group.
-    group = models.ForeignKey(Group, on_delete=models.CASCADE)
+    # The workspace the item that is trashed is found in, if the trashed item is the
+    # workspace itself then this should also be set to that trashed workspace.
+    workspace = models.ForeignKey(Workspace, on_delete=models.CASCADE)
     # The application the item that is trashed is found in, if the trashed item is the
     # application itself then this should also be set to that trashed application.
     application = models.ForeignKey(
@@ -340,13 +545,235 @@ class TrashEntry(models.Model):
     # of trashed items are simple and do not require joining to many different tables
     # to simply get these details.
     name = models.TextField()
+    # If multiple items have been deleted via one trash entry, for example with a
+    # batch update, the names can be provided here. The client can then visualize
+    # this differently.
+    names = ArrayField(base_field=models.TextField(), null=True)
     parent_name = models.TextField(null=True, blank=True)
     extra_description = models.TextField(null=True, blank=True)
 
+    # this permits to trash items together with a single entry
+    related_items = models.JSONField(default=dict, null=True)
+
     class Meta:
-        unique_together = ("trash_item_type", "parent_trash_item_id", "trash_item_id")
+        constraints = [
+            UniqueConstraint(
+                fields=["trash_item_type", "parent_trash_item_id", "trash_item_id"],
+                name="unique_with_parent_trash_item_id",
+            ),
+            UniqueConstraint(
+                fields=["trash_item_type", "trash_item_id"],
+                condition=Q(parent_trash_item_id=None),
+                name="unique_without_parent_trash_item_id",
+            ),
+        ]
         indexes = [
             models.Index(
-                fields=["-trashed_at", "trash_item_type", "group", "application"]
+                fields=["-trashed_at", "trash_item_type", "workspace", "application"]
             )
         ]
+
+
+class DuplicateApplicationJob(
+    JobWithUserIpAddress, JobWithWebsocketId, JobWithUndoRedoIds, Job
+):
+    original_application = models.ForeignKey(
+        Application,
+        null=True,
+        related_name="duplicated_by_jobs",
+        on_delete=models.SET_NULL,
+        help_text="The Baserow application to duplicate.",
+    )
+    duplicated_application = models.OneToOneField(
+        Application,
+        null=True,
+        related_name="duplicated_from_jobs",
+        on_delete=models.SET_NULL,
+        help_text="The duplicated Baserow application.",
+    )
+
+
+class SnapshotManager(BaseManager.from_queryset(QuerySet)):
+    def restorable(self) -> QuerySet:
+        """
+        Returns a queryset with Snapshots that can be restored.
+
+        :return: A queryset with Snapshots that can be restored.
+        """
+
+        return self.get_queryset().filter(
+            snapshot_to_application__isnull=False, mark_for_deletion=False
+        )
+
+    def unusable(self) -> QuerySet:
+        """
+        Returns a queryset with Snapshots that cannot be restored.
+
+        :returns: A queryset with Snapshots that cannot be restored because they are
+            either not associated with an application or are marked for deletion.
+        """
+
+        return self.get_queryset().filter(
+            Q(snapshot_to_application__isnull=True) | Q(mark_for_deletion=True)
+        )
+
+
+class Snapshot(HierarchicalModelMixin, models.Model):
+    name = models.CharField(max_length=160)
+    snapshot_from_application = models.ForeignKey(
+        Application, on_delete=models.CASCADE, null=False, related_name="snapshot_to"
+    )
+    snapshot_to_application = models.ForeignKey(
+        Application, on_delete=models.CASCADE, null=True, related_name="snapshot_from"
+    )
+    mark_for_deletion = models.BooleanField(default=False)
+    created_by = models.ForeignKey(User, null=True, on_delete=models.SET_NULL)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def get_parent(self):
+        return self.snapshot_from_application
+
+    objects = SnapshotManager()
+
+
+class InstallTemplateJob(
+    JobWithUserIpAddress,
+    JobWithWebsocketId,
+    JobWithUndoRedoIds,
+    Job,
+):
+    workspace = models.ForeignKey(
+        Workspace,
+        on_delete=models.CASCADE,
+        help_text="The group where the template is installed.",
+    )
+    template = models.ForeignKey(
+        Template,
+        on_delete=models.CASCADE,
+        help_text="The template that is installed.",
+    )
+    installed_applications = models.JSONField(default=list)
+
+
+class DefaultImportExportResourceManager(models.Manager):
+    def get_queryset(self):
+        return super().get_queryset().filter(marked_for_deletion=False)
+
+
+class ImportExportResource(CreatedAndUpdatedOnMixin, models.Model):
+    uuid = models.UUIDField(
+        default=uuid.uuid4,
+        editable=False,
+        db_index=True,
+        help_text=(
+            "The UUID of the resource, used in the archive name and as the directory "
+            "name for temporary storage before archiving or extraction. "
+            "The folder must be checked and deleted before deleting the instance."
+        ),
+    )
+    original_name = models.CharField(
+        max_length=255,
+        help_text=(
+            "The original name of the file. "
+            "This is only used in the frontend for uploaded files.",
+        ),
+    )
+    size = models.PositiveIntegerField(
+        default=0, help_text="The size of the resource in bytes."
+    )
+    created_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        help_text="The owner of the resource.",
+    )
+    is_valid = models.BooleanField(
+        default=False,
+        help_text=(
+            "Indicates whether the resource is valid and can be used for import "
+            "or export. If it's not valid, the temporary files should be deleted before "
+            "deleting the instance.",
+        ),
+    )
+    marked_for_deletion = models.BooleanField(
+        default=False,
+        help_text=(
+            "Indicates whether the resource is marked for deletion. "
+            "The temporary files should be deleted before deleting the instance."
+        ),
+    )
+
+    objects_and_trash = models.Manager()
+    objects = DefaultImportExportResourceManager()
+
+    def get_archive_name(self):
+        return f"{self.uuid}.zip"
+
+    def save(self, *args, **kwargs):
+        if not self.uuid:
+            self.uuid = uuid.uuid4()
+        super().save(*args, **kwargs)
+
+
+class ExportApplicationsJob(
+    JobWithUserIpAddress, JobWithWebsocketId, JobWithUndoRedoIds, Job
+):
+    workspace = models.ForeignKey(
+        Workspace,
+        null=True,
+        on_delete=models.SET_NULL,
+        help_text="The workspace that the applications are going to be exported from.",
+    )
+    application_ids = models.JSONField(
+        default=list,
+        help_text="The list of application ids that are going to be exported.",
+    )
+    only_structure = models.BooleanField(
+        default=False,
+        help_text="Indicates if only the structure of the applications should be "
+        "exported, without user data.",
+    )
+    resource = models.ForeignKey(
+        ImportExportResource,
+        on_delete=models.SET_NULL,
+        null=True,
+        help_text="The resource that contains the exported applications.",
+    )
+
+
+class ImportApplicationsJob(
+    JobWithUserIpAddress, JobWithWebsocketId, JobWithUndoRedoIds, Job
+):
+    workspace = models.ForeignKey(
+        Workspace,
+        null=True,
+        on_delete=models.SET_NULL,
+        help_text="The workspace id that the applications are going to be imported to.",
+    )
+    application_ids = models.JSONField(
+        default=list,
+        help_text=(
+            "The list of application IDs that are going to be imported. "
+            "These IDs must be available in the resource."
+        ),
+    )
+    only_structure = models.BooleanField(
+        default=False,
+        help_text="Indicates if only the structure of the applications should be "
+        "exported, without user data.",
+    )
+    resource = models.ForeignKey(
+        ImportExportResource,
+        on_delete=models.SET_NULL,
+        null=True,
+        help_text="The resource that contains the applications to import.",
+    )
+
+
+class ImportExportTrustedSource(models.Model):
+    name = models.CharField(max_length=255, blank=True)
+    private_key = models.TextField(help_text="The private key used to sign the export.")
+    public_key = models.TextField(
+        help_text="The public key used to verify the signature of the export."
+    )
+    created_at = models.DateTimeField(auto_now_add=True)

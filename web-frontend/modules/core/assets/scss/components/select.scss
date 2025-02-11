@@ -1,30 +1,41 @@
 .select {
-  @extend .context;
+  @extend %context;
 
   max-width: 360px;
-}
-
-.select__search {
-  position: relative;
-  border-bottom: 1px solid $color-neutral-200;
+  display: flex;
+  flex-direction: column;
 }
 
 .select__search-icon {
-  color: $color-neutral-300;
+  color: $palette-neutral-600;
+  padding: 0 10px;
+  font-size: 16px;
 
-  @include absolute(0, auto, auto, 0);
-  @include center-text(32px, 14px, 36px);
+  .select__search:focus-within & {
+    color: $palette-blue-500;
+  }
+}
+
+.select__search {
+  flex: 0 0;
+  position: relative;
+  border-bottom: 1px solid $palette-neutral-200;
+
+  @include flex-align-items;
 }
 
 .select__search-input {
   display: block;
   width: 100%;
   border: none;
-  padding: 0 12px 0 36px;
-  border-top-left-radius: 6px;
-  border-top-right-radius: 6px;
+  padding: 0 12px 0 0;
 
-  @include fixed-height(36px, 14px);
+  @include rounded($rounded);
+  @include fixed-height(36px, 12px);
+
+  &::placeholder {
+    color: $palette-neutral-700;
+  }
 }
 
 .select__items {
@@ -32,18 +43,37 @@
   list-style: none;
   padding: 0;
   margin: 0;
-  max-height: (4 * 36px) + 20px; // we show max 8 items
+  min-height: 0;
+  max-height: (4 * 36px) + 20px; // we show max 4 items
   // note that the value is `scroll` and not `auto` because it depends on the
   // v-auto-overflow-scroll directive.
   overflow-y: scroll;
 
   &::before,
   &::after {
-    content: "";
+    content: '';
     display: block;
-    height: 10px;
+    height: 4px;
     width: 100%;
   }
+
+  // This class can be set if the max-height is managed by a container element.
+  &.select__items--no-max-height {
+    max-height: none;
+  }
+
+  ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+}
+
+.select__items--empty {
+  padding: 20px 10px;
+  white-space: normal;
+  text-align: center;
+  color: $palette-neutral-700;
 }
 
 .select__items-loading {
@@ -60,67 +90,97 @@
   }
 }
 
-%select__item-size {
-  @include fixed-height(32px, 14px);
+.select__item-label {
+  color: $color-neutral-600;
+  margin: 10px 0 10px 10px;
+  font-size: 14px;
+}
+
+.select__item-active-icon {
+  text-align: center;
+  color: $palette-neutral-1200;
+  position: absolute;
+  top: 8px;
+  right: 5px;
+  font-size: 17px;
+  display: none;
+
+  .select__item.disabled &,
+  .select__item-link:active & {
+    color: $palette-neutral-400;
+  }
 }
 
 .select__item {
   position: relative;
-  margin: 0 8px 4px 8px;
-  padding: 0 32px 0 10px;
-  border-radius: 3px;
+  margin: 0 4px 3px;
   user-select: none;
+
+  @include rounded($rounded);
 
   &:last-child {
     margin-bottom: 0;
   }
 
-  &:hover {
-    background-color: $color-neutral-100;
+  &:hover,
+  &.hover {
+    background-color: $palette-neutral-100;
+  }
+
+  &--selected {
+    background-color: $palette-neutral-100;
+  }
+
+  &--indented {
+    margin-left: 20px;
   }
 
   &.select__item--loading::before {
-    content: " ";
+    content: ' ';
 
     @include loading(14px);
     @include absolute(9px, 9px, auto, auto);
   }
 
-  &.active {
-    background-color: $color-primary-100;
+  &.active:not(.select__item--loading) {
+    background-color: rgba($palette-neutral-1300, 0.04);
 
-    &:not(.select__item--loading)::after {
-      @extend .fas;
-      @extend %select__item-size;
-
-      content: fa-content($fa-var-check-circle);
-      width: 32px;
-      text-align: center;
-      color: $color-success-500;
-
-      @include absolute(0, 0, auto, auto);
+    .select__item-active-icon {
+      display: block;
     }
 
-    &:not(.select__item--no-options):hover::after {
-      display: none;
+    &:not(.select__item--no-options):hover {
+      .select__item-active-icon {
+        display: none;
+      }
     }
   }
 
-  &.disabled:hover {
+  &.disabled {
     background-color: transparent;
+    cursor: not-allowed;
+
+    &:hover {
+      background-color: transparent;
+    }
   }
 }
 
 .select__item-link {
   display: block;
-  color: $color-primary-900;
+  color: $palette-neutral-1300;
+  padding: 8px 32px 8px 10px;
+
+  .select__item--has-notification & {
+    padding-right: 48px;
+  }
 
   &:hover {
     text-decoration: none;
   }
 
   .select__item.disabled & {
-    color: $color-neutral-400;
+    color: $palette-neutral-700;
 
     &:hover {
       cursor: inherit;
@@ -128,35 +188,62 @@
   }
 }
 
+.select__item-link--indented {
+  padding-left: 14px;
+}
+
 .select__item-name {
+  display: flex;
+  align-items: center;
+  font-weight: 500;
+  line-height: 15px;
+  gap: 6px;
+
   @extend %ellipsis;
-  @extend %select__item-size;
+
+  .select__item-link:active & {
+    color: $palette-neutral-900;
+  }
+}
+
+.select__item-name-text {
+  @extend %ellipsis;
 }
 
 .select__item-icon {
-  margin-right: 6px;
+  font-size: 16px;
+
+  .select__item.disabled &,
+  .select__item-link:active & {
+    color: $palette-neutral-900;
+  }
+}
+
+.select__item-image {
+  max-width: 15px;
+  max-height: 15px;
 }
 
 .select__item-description {
-  font-size: 11px;
-  margin-right: -32px;
-  line-height: 140%;
-  color: $color-neutral-600;
-  padding-bottom: 6px;
+  font-size: 12px;
+  color: $palette-neutral-900;
+  white-space: normal;
+  line-height: 18px;
+  font-weight: 400;
+  padding-top: 6px;
 }
 
 .select__item-options {
-  @extend %select__item-size;
-
   display: none;
   text-align: center;
   width: 32px;
-  color: $color-neutral-300;
+  color: $palette-neutral-800;
+  font-size: 17px;
 
-  @include absolute(0, 0, auto, auto);
+  @include absolute(5px, 0, auto, auto);
 
   &:hover {
-    color: $color-neutral-700;
+    color: $palette-neutral-1200;
   }
 
   :not(.select__item--loading):not(.select__item--no-options):hover > & {
@@ -170,58 +257,82 @@
 }
 
 .select__footer {
-  border-top: 1px solid $color-neutral-200;
+  flex: 0 0;
+  border-top: 1px solid $palette-neutral-200;
+  padding: 4px 4px 0;
 }
 
 .select__footer-button {
   position: relative;
   display: block;
-  padding: 0 12px;
-  color: $color-neutral-600;
+  padding: 0 10px;
+  color: $palette-neutral-1300;
   user-select: none;
   border-bottom-left-radius: 2px;
   border-bottom-right-radius: 2px;
+  margin-bottom: 4px;
 
+  @include rounded($rounded);
   @include fixed-height(36px, 14px);
-
-  .fas {
-    margin-right: 6px;
-  }
+  @include flex-align-items(6px);
 
   &:hover {
-    background-color: $color-neutral-100;
+    background-color: rgba($palette-neutral-1300, 0.04);
     text-decoration: none;
   }
 
   &.button--loading {
-    background-color: $color-neutral-200;
+    background-color: $palette-neutral-400;
   }
 }
 
-.select__footer-multiple {
+.select__footer-create {
   display: flex;
-  padding: 8px 12px;
+  flex-wrap: wrap;
 }
 
-.select__footer-multiple-label {
-  @extend %select__item-size;
-}
-
-.select__footer-multiple-item {
-  @extend %select__item-size;
-
-  margin-left: 8px;
+.select__footer-create-link {
+  position: relative;
+  width: 50%;
+  color: $palette-neutral-1300;
   padding: 0 10px;
-  color: $color-primary-900;
-  border-radius: 3px;
+  margin-bottom: 4px;
+  min-width: 0;
+  line-height: 26px;
+  font-size: 13px;
+
+  @include rounded($rounded);
+  @include flex-align-items(4px);
+
+  &:only-child {
+    width: 100%;
+    flex: unset;
+    margin-right: unset !important;
+    padding-left: 6px;
+  }
 
   &:hover {
     text-decoration: none;
-    background-color: $color-neutral-100;
+  }
+
+  &.select__footer-create-link--disabled {
+    color: $palette-neutral-1000;
+    cursor: inherit;
+  }
+
+  &:not(.select__footer-create-link--disabled):hover {
+    text-decoration: none;
+    background-color: rgba($palette-neutral-1300, 0.04);
   }
 }
 
-.select__footer-multiple-icon {
-  color: $color-neutral-300;
-  margin-right: 4px;
+.select__footer-create-link-icon {
+  color: $palette-neutral-800;
+  font-size: 14px;
+  margin-left: auto;
+
+  .select__footer-create-link:not(.select__footer-create-link--disabled):hover
+    & {
+    color: $palette-neutral-1300;
+  }
 }

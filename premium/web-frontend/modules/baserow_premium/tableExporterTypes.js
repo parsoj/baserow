@@ -2,18 +2,41 @@ import { TableExporterType } from '@baserow/modules/database/exporterTypes'
 import { GridViewType } from '@baserow/modules/database/viewTypes'
 import TableJSONExporter from '@baserow_premium/components/exporter/TableJSONExporter'
 import TableXMLExporter from '@baserow_premium/components/exporter/TableXMLExporter'
+import PremiumModal from '@baserow_premium/components/PremiumModal'
+import PremiumFeatures from '@baserow_premium/features'
+import TableExcelExporter from '@baserow_premium/components/exporter/TableExcelExporter'
 
-export class JSONTableExporter extends TableExporterType {
-  getType() {
+class PremiumTableExporterType extends TableExporterType {
+  getDeactivatedText() {
+    return this.app.i18n.t('premium.deactivated')
+  }
+
+  getDeactivatedClickModal() {
+    return PremiumModal
+  }
+
+  isDeactivated(workspaceId) {
+    // If the user is looking a publicly shared view, then the feature must never be
+    // deactivated because the check can't be done properly.
+    const isPublic = this.app.store.getters['page/view/public/getIsPublic']
+    return (
+      !this.app.$hasFeature(PremiumFeatures.PREMIUM, workspaceId) && !isPublic
+    )
+  }
+}
+
+export class JSONTableExporter extends PremiumTableExporterType {
+  static getType() {
     return 'json'
   }
 
   getIconClass() {
-    return 'file-code'
+    return 'baserow-icon-file-code'
   }
 
   getName() {
-    return 'Export to JSON'
+    const { i18n } = this.app
+    return i18n.t('premium.exporterType.json')
   }
 
   getFormComponent() {
@@ -25,21 +48,22 @@ export class JSONTableExporter extends TableExporterType {
   }
 
   getSupportedViews() {
-    return [new GridViewType().getType()]
+    return [GridViewType.getType()]
   }
 }
 
-export class XMLTableExporter extends TableExporterType {
-  getType() {
+export class XMLTableExporter extends PremiumTableExporterType {
+  static getType() {
     return 'xml'
   }
 
   getIconClass() {
-    return 'file-code'
+    return 'baserow-icon-file-code'
   }
 
   getName() {
-    return 'Export to XML'
+    const { i18n } = this.app
+    return i18n.t('premium.exporterType.xml')
   }
 
   getFormComponent() {
@@ -51,6 +75,37 @@ export class XMLTableExporter extends TableExporterType {
   }
 
   getSupportedViews() {
-    return [new GridViewType().getType()]
+    return [GridViewType.getType()]
+  }
+}
+
+export class ExcelTableExporterType extends PremiumTableExporterType {
+  static getType() {
+    return 'excel'
+  }
+
+  getFileExtension() {
+    return 'xlsx'
+  }
+
+  getIconClass() {
+    return 'baserow-icon-file-excel'
+  }
+
+  getName() {
+    const { i18n } = this.app
+    return i18n.t('premium.exporterType.excel')
+  }
+
+  getFormComponent() {
+    return TableExcelExporter
+  }
+
+  getCanExportTable() {
+    return true
+  }
+
+  getSupportedViews() {
+    return [GridViewType.getType()]
   }
 }

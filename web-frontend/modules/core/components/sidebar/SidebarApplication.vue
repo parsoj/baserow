@@ -2,60 +2,51 @@
   <li
     class="tree__item"
     :class="{
-      active: application._.selected,
       'tree__item--loading': application._.loading,
     }"
   >
-    <div class="tree__action tree__action--has-options" data-sortable-handle>
-      <a class="tree__link" @click="$emit('selected', application)">
-        <i
-          class="tree__icon tree__icon--type fas"
-          :class="'fa-' + application._.type.iconClass"
-        ></i>
-        <Editable
-          ref="rename"
-          :value="application.name"
-          @change="renameApplication(application, $event)"
-        ></Editable>
+    <div
+      class="tree__action tree__action--has-options"
+      :class="{ 'tree__action--highlighted': highlighted }"
+      data-sortable-handle
+    >
+      <a
+        class="tree__link"
+        :class="{ 'tree__link--empty': application.name === '' }"
+        :title="application.name"
+        @click="$emit('selected', application)"
+      >
+        <i class="tree__icon" :class="application._.type.iconClass"></i>
+        <span class="tree__link-text">
+          <template v-if="application.name === ''">&nbsp;</template>
+          <Editable
+            ref="rename"
+            :value="application.name"
+            @change="renameApplication(application, $event)"
+          ></Editable>
+        </span>
       </a>
+
       <a
         ref="contextLink"
         class="tree__options"
         @click="$refs.context.toggle($refs.contextLink, 'bottom', 'right', 0)"
         @mousedown.stop
       >
-        <i class="fas fa-ellipsis-v"></i>
+        <i class="baserow-icon-more-vertical"></i>
       </a>
-      <Context ref="context">
-        <div class="context__menu-title">{{ application.name }}</div>
-        <ul class="context__menu">
-          <slot name="context"></slot>
-          <li>
-            <a @click="enableRename()">
-              <i class="context__menu-icon fas fa-fw fa-pen"></i>
-              Rename {{ application._.type.name | lowercase }}
-            </a>
-          </li>
-          <li>
-            <a @click="showApplicationTrashModal">
-              <i class="context__menu-icon fas fa-fw fa-recycle"></i>
-              View trash
-            </a>
-          </li>
-          <li>
-            <a
-              :class="{ 'context__menu-item--loading': deleteLoading }"
-              @click="deleteApplication()"
-            >
-              <i class="context__menu-icon fas fa-fw fa-trash"></i>
-              Delete {{ application._.type.name | lowercase }}
-            </a>
-          </li>
-        </ul>
-      </Context>
+
+      <component
+        :is="getApplicationContextComponent(application)"
+        ref="context"
+        :application="application"
+        :workspace="workspace"
+        @rename="handleRenameApplication()"
+      ></component>
+
       <TrashModal
         ref="applicationTrashModal"
-        :initial-group="group"
+        :initial-workspace="workspace"
         :initial-application="application"
       >
       </TrashModal>
@@ -65,73 +56,55 @@
 </template>
 
 <script>
-import { notifyIf } from '@baserow/modules/core/utils/error'
+import SidebarDuplicateApplicationContextItem from '@baserow/modules/core/components/sidebar/SidebarDuplicateApplicationContextItem.vue'
 import TrashModal from '@baserow/modules/core/components/trash/TrashModal'
+import SnapshotsModal from '@baserow/modules/core/components/snapshots/SnapshotsModal'
+import application from '@baserow/modules/core/mixins/application'
 
 export default {
   name: 'SidebarApplication',
-  components: { TrashModal },
+  components: {
+    TrashModal,
+    SidebarDuplicateApplicationContextItem,
+    SnapshotsModal,
+  },
+  mixins: [application],
   props: {
     application: {
       type: Object,
       required: true,
     },
-    group: {
+    workspace: {
       type: Object,
       required: true,
+    },
+    highlighted: {
+      type: Boolean,
+      default: false,
     },
   },
   data() {
     return {
-      deleteLoading: false,
+      deleting: false,
     }
   },
-  methods: {
-    setLoading(application, value) {
-      this.$store.dispatch('application/setItemLoading', {
-        application,
-        value,
-      })
+  computed: {
+    additionalContextComponents() {
+      return Object.values(this.$registry.getAll('plugin'))
+        .reduce(
+          (components, plugin) =>
+            components.concat(
+              plugin.getAdditionalApplicationContextComponents(
+                this.workspace,
+                this.application
+              )
+            ),
+          []
+        )
+        .filter((component) => component !== null)
     },
-    enableRename() {
-      this.$refs.context.hide()
-      this.$refs.rename.edit()
-    },
-    async renameApplication(application, event) {
-      this.setLoading(application, true)
-
-      try {
-        await this.$store.dispatch('application/update', {
-          application,
-          values: {
-            name: event.value,
-          },
-        })
-      } catch (error) {
-        this.$refs.rename.set(event.oldValue)
-        notifyIf(error, 'application')
-      }
-
-      this.setLoading(application, false)
-    },
-    async deleteApplication() {
-      this.deleteLoading = true
-
-      try {
-        await this.$store.dispatch('application/delete', this.application)
-        await this.$store.dispatch('notification/restore', {
-          trash_item_type: 'application',
-          trash_item_id: this.application.id,
-        })
-      } catch (error) {
-        notifyIf(error, 'application')
-      }
-
-      this.deleteLoading = false
-    },
-    showApplicationTrashModal() {
-      this.$refs.context.hide()
-      this.$refs.applicationTrashModal.show()
+    applicationType() {
+      return this.$registry.get('application', this.application.type)
     },
   },
 }

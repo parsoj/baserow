@@ -1,4 +1,4 @@
-import { mimetype2fa } from '@baserow/modules/core/utils/fontawesome'
+import { mimetype2icon } from '@baserow/modules/core/utils/fileTypeToIcon'
 
 export default {
   methods: {
@@ -33,12 +33,21 @@ export default {
      * Updates the visible name of the file with the given index.
      */
     renameFile(value, index, newName) {
+      if (newName === '' || newName === null) {
+        this.$store.dispatch('toast/error', {
+          title: this.$t('fileField.errorEmptyFileNameTitle'),
+          message: this.$t('fileField.errorEmptyFileNameMessage'),
+        })
+        return false
+      }
+
       const newValue = JSON.parse(JSON.stringify(value))
       newValue[index].visible_name = newName
       this.$emit('update', newValue, value)
+      return true
     },
     getIconClass(mimeType) {
-      return mimetype2fa(mimeType)
+      return mimetype2icon(mimeType)
     },
   },
 }

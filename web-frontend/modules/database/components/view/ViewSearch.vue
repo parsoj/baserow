@@ -1,5 +1,5 @@
 <template>
-  <div>
+  <div class="header__search">
     <a
       ref="contextLink"
       class="header__filter-link"
@@ -8,15 +8,16 @@
       }"
       @click="$refs.context.toggle($refs.contextLink, 'bottom', 'right', 4)"
     >
-      <i class="header__search-icon fas fa-search"></i>
+      <i class="header__search-icon iconoir-search"></i>
       {{ headerSearchTerm }}
     </a>
     <ViewSearchContext
       ref="context"
       :view="view"
       :fields="fields"
-      :primary="primary"
+      :read-only="readOnly"
       :store-prefix="storePrefix"
+      :always-hide-rows-not-matching-search="alwaysHideRowsNotMatchingSearch"
       @refresh="$emit('refresh', $event)"
       @search-changed="searchChanged"
     ></ViewSearchContext>
@@ -38,13 +39,20 @@ export default {
       type: Array,
       required: true,
     },
-    primary: {
-      type: Object,
-      required: true,
+    readOnly: {
+      type: Boolean,
+      required: false,
+      default: false,
     },
     storePrefix: {
       type: String,
-      required: true,
+      required: false,
+      default: '',
+    },
+    alwaysHideRowsNotMatchingSearch: {
+      type: Boolean,
+      required: false,
+      default: false,
     },
   },
   data: () => {
@@ -52,9 +60,36 @@ export default {
       headerSearchTerm: '',
     }
   },
+  watch: {
+    $props: {
+      immediate: true,
+      handler() {
+        if (!this.storePrefix.length && !this.readOnly) {
+          throw new Error(
+            'A storePrefix is required when the search is not read-only.'
+          )
+        }
+      },
+    },
+  },
+  mounted() {
+    this.$priorityBus.$on(
+      'start-search',
+      this.$priorityBus.level.LOW,
+      this.searchStarted
+    )
+  },
+  beforeDestroy() {
+    this.$priorityBus.$off('start-search', this.searchStarted)
+  },
   methods: {
     searchChanged(newSearch) {
       this.headerSearchTerm = newSearch
+    },
+    searchStarted({ event }) {
+      event.preventDefault()
+      this.$bus.$emit('close-modals')
+      this.$refs.contextLink.click()
     },
   },
 }

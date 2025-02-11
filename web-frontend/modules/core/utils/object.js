@@ -1,5 +1,8 @@
+import _ from 'lodash'
+import Vue from 'vue'
+
 /**
- * Clones the provided Javascript object and returns that one.
+ * Clones the provided JavaScript object and returns that one.
  *
  * @param o
  * @return {object}
@@ -67,4 +70,108 @@ export function mappingToStringifiedJSONLines(
     index += 1
     return first ? lines : index
   }
+}
+
+export function isPromise(p) {
+  return (
+    p !== null &&
+    typeof p === 'object' &&
+    typeof p.then === 'function' &&
+    typeof p.catch === 'function'
+  )
+}
+
+/**
+ * Get the value at `path` of `obj`, similar to Lodash `get` function.
+ *
+ * @param {Object} obj The object that holds the value
+ * @param {string | Array[string]} path The path to the value or a list with the path parts
+ * @param {any} defaultValue The value to return if the path is not found
+ * @return {Object} The value held by the path
+ */
+export function getValueAtPath(obj, path) {
+  function _getValueAtPath(obj, keys) {
+    const [first, ...rest] = keys
+    if (first === undefined || first === null) {
+      return obj
+    }
+    if (first in obj) {
+      return _getValueAtPath(obj[first], rest)
+    }
+    if (Array.isArray(obj) && first === '*') {
+      const results = obj
+        // Call recursively this function transforming the `*` in the path in a list
+        // of indexes present in the object, e.g:
+        // get(obj, "a.*.b") <=> [get(obj, "a.0.b"), get(obj, "a.1.b"), ...]
+        .map((_, index) => _getValueAtPath(obj, [index.toString(), ...rest]))
+        // Remove empty results
+        // Note: Don't exclude false values such as booleans, empty strings, etc.
+        .filter((result) => result !== null && result !== undefined)
+      // Return null in case there are no results
+      return results.length ? results : null
+    }
+    return null
+  }
+  const keys = typeof path === 'string' ? _.toPath(path) : path
+  return _getValueAtPath(obj, keys)
+}
+
+/**
+ * Deeply sets a value in an object (or array) from a dotted path string.
+ * Creates any missing intermediate parts if necessary.
+ * Use Vue.set to keep reactivity.
+ *
+ * @param {Object} obj - The object we want to update.
+ * @param {String} path - The path, delimited by periods, to the value.
+ * @param {Any} value - The value to set at the path.
+ */
+export function setValueAtPath(obj, path, value) {
+  // Note: We can't use `_.set` or `_.setWith` because would update all intermediary
+  // level and that's not what we want.
+  const keys = path.split('.')
+  let current = obj
+
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i]
+
+    // If we are at the last key, set the value
+    if (i === keys.length - 1) {
+      Vue.set(current, key, value)
+    } else {
+      // If the key does not exist or is not an object, create an empty object or array
+      if (!(key in current) || typeof current[key] !== 'object') {
+        // Check if the next key is a number to decide between object or array
+        Vue.set(current, key, isNaN(keys[i + 1]) ? {} : [])
+      }
+      // Move to the next level in the object
+      current = current[key]
+    }
+  }
+}
+
+/**
+ * Uses Object.defineProperty to make Vue provide/inject reactive.
+ *
+ * @param staticProperties The original object
+ * @param reactiveProperties An object containing the properties and values to
+ *                           become reactive
+ * @return {object} The original object with the updated properties
+ * @see https://stackoverflow.com/questions/65718651/how-do-i-make-vue-2-provide-inject-api-reactive
+ *
+ * @example
+ * const obj = { a: "A", b: "B" }
+ * fixPropertyReactivityForProvide(obj, { c: () => "C" }
+ * console.log(obj.c) // "c" property is now reactive and will return "C"
+ */
+export function fixPropertyReactivityForProvide(
+  staticProperties,
+  reactiveProperties
+) {
+  Object.entries(reactiveProperties).forEach(([propertyName, getValue]) => {
+    Object.defineProperty(staticProperties, propertyName, {
+      enumerable: true,
+      get: () => getValue(),
+    })
+  })
+  return staticProperties
 }

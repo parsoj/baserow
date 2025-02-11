@@ -13,37 +13,53 @@ export default {
         return {}
       },
     },
+    disabled: {
+      type: Boolean,
+      required: false,
+      default: false,
+    },
   },
   data() {
     return {
       // A list of values that the form allows. If null all values are allowed.
       allowedValues: null,
+      // By setting emitValuesOnReset to false in the form's component
+      // the values changed event won't be sent right after resetting the
+      // form
+      emitValuesOnReset: true,
+      isAfterReset: true,
     }
   },
   mounted() {
-    Object.assign(this.values, this.values, this.getDefaultValues())
+    this.values = Object.assign({}, this.values, this.getDefaultValues())
   },
   watch: {
     values: {
       deep: true,
       handler(newValues) {
-        this.$emit('values-changed', newValues)
+        this.emitChange(newValues)
       },
     },
   },
   methods: {
     /**
-     * Returns all the provided default values, but if the allowedValues are set
-     * an object only containing those values is returned. This could be useful
-     * when the defaultValues also contain other values which must not be used
-     * when submitting.
+     * Returns whether a key of the given defaultValue should be handled by this
+     * form component. This is useful when the defaultValues also contain other
+     * values which must not be used when submitting. By default this implementation
+     * is filtered by the list of `allowedValues`.
+     */
+    isAllowedKey(key) {
+      if (this.allowedValues !== null) {
+        return this.allowedValues.includes(key)
+      }
+      return true
+    },
+    /**
+     * Returns all the provided default values filtered by the `isAllowedKey` method.
      */
     getDefaultValues() {
-      if (this.allowedValues === null) {
-        return this.defaultValues
-      }
       return Object.keys(this.defaultValues).reduce((result, key) => {
-        if (this.allowedValues.includes(key)) {
+        if (this.isAllowedKey(key)) {
           let value = this.defaultValues[key]
 
           // If the value is an array or object, it could be that it contains
@@ -61,36 +77,101 @@ export default {
         return result
       }, {})
     },
-    submit() {
-      this.$v.$touch()
-
-      // Also touch all the child forms so that all the error messages are going to
-      // be displayed.
-      for (const child of this.$children) {
-        if ('isFormValid' in child && '$v' in child) {
-          child.$v.$touch()
-        }
-      }
-
-      if (this.isFormValid()) {
-        this.$emit('submitted', this.getFormValues())
+    /**
+     * Combined with the FormElement component, this method make sure
+     * to scroll to the first error field after a fail form submit.
+     * It is particularly useful for small screen devices or for long
+     * forms, helping the user to see the error message even if the
+     * it is outside of the current viewport.
+     */
+    focusOnFirstError() {
+      const firstError = this.$el.querySelector('[data-form-error]')
+      if (firstError) {
+        firstError.scrollIntoView({ behavior: 'smooth' })
       }
     },
     /**
-     * Returns true is everything is valid.
+     * Select all children that match the given predicate.
+     * @param {Function} predicate a function that receive the current child as parameter and
+     *   should return true if the child should be accepted.
+     * @param {Boolean} deep true if you want to deeply search for child
+     * @returns
      */
-    isFormValid() {
+    getChildForms(predicate = (child) => 'isFormValid' in child, deep = false) {
+      const children = []
+
+      const getDeep = (child) => {
+        if (predicate(child)) {
+          children.push(child)
+        }
+        if (deep) {
+          // Search into children of children
+          child.$children.forEach(getDeep)
+        }
+      }
+
+      for (const child of this.$children) {
+        getDeep(child)
+      }
+      return children
+    },
+    touch(deep = false) {
+      if ('$v' in this) {
+        this.$v.$touch()
+      }
+
+      // Also touch all the child forms so that all the error messages are going to
+      // be displayed.
+      for (const child of this.getChildForms(
+        (child) => 'touch' in child,
+        deep
+      )) {
+        child.touch(deep)
+      }
+    },
+    submit(deep = false) {
+      if (this.selectedFieldIsDeactivated) {
+        return
+      }
+
+      this.touch(deep)
+
+      if (this.isFormValid(deep)) {
+        this.$emit('submitted', this.getFormValues(deep))
+      } else {
+        this.$nextTick(() => this.focusOnFirstError())
+      }
+    },
+    /**
+     * Returns true if the field value has no errors
+     */
+    fieldHasErrors(fieldName) {
+      // a field can be without any validators
+      return this.$v.values[fieldName]
+        ? this.$v.values[fieldName].$error
+        : false
+    },
+    /**
+     * Returns true is everything is valid.
+     *
+     * `deep` parameter allow to deeply search the form elements and not staying at the
+     * first level of children.
+     */
+    isFormValid(deep = false) {
       // Some forms might not do any validation themselves. If they don't, then they
       // are by definition valid if their children are valid.
       const thisFormInvalid = '$v' in this && this.$v.$invalid
-      return !thisFormInvalid && this.areChildFormsValid()
+      return !thisFormInvalid && this.areChildFormsValid(deep)
     },
     /**
      * Returns true if all the child form components are valid.
      */
-    areChildFormsValid() {
-      for (const child of this.$children) {
-        if ('isFormValid' in child && !child.isFormValid()) {
+    areChildFormsValid(deep = false) {
+      for (const child of this.getChildForms(
+        (child) => 'isFormValid' in child,
+        deep
+      )) {
+        if (!child.isFormValid(deep)) {
           return false
         }
       }
@@ -100,24 +181,33 @@ export default {
      * A method that can be overridden to do some mutations on the values before
      * calling the submitted event.
      */
-    getFormValues() {
-      return Object.assign({}, this.values, this.getChildFormsValues())
+    getFormValues(deep = false) {
+      return Object.assign({}, this.values, this.getChildFormsValues(deep))
     },
     /**
      * Returns an object containing the values of the child forms.
      */
-    getChildFormsValues() {
+    getChildFormsValues(deep = false) {
+      const children = this.getChildForms(
+        (child) => 'getChildFormsValues' in child,
+        deep
+      )
       return Object.assign(
         {},
-        ...this.$children.map((child) => {
-          return 'getChildFormsValues' in child ? child.getFormValues() : {}
+        ...children.map((child) => {
+          return child.getFormValues(deep)
         })
       )
     },
     /**
      * Resets the form and the child forms to its original state.
+     *
+     * `deep` parameter allow to deeply search the form elements and not staying at the
+     * first level of children.
      */
-    reset() {
+    async reset(deep = false) {
+      this.isAfterReset = true
+
       Object.assign(
         this.values,
         this.$options.data.call(this).values,
@@ -128,11 +218,38 @@ export default {
         this.$v.$reset()
       }
 
-      // Also reset the child forms.
-      for (const child of this.$children) {
-        if ('isFormValid' in child) {
-          child.reset()
+      await this.$nextTick()
+
+      // Also reset the child forms after a tick to allow default values to be updated.
+      this.getChildForms((child) => 'reset' in child, deep).forEach((child) =>
+        child.reset()
+      )
+    },
+
+    /**
+     * Returns if a child form has indicated it handled the error, false otherwise.
+     */
+    handleErrorByForm(error, deep = false) {
+      let childHandledIt = false
+      const children = this.getChildForms(
+        (child) => 'handleErrorByForm' in child,
+        deep
+      )
+      for (const child of children) {
+        if (child.handleErrorByForm(error)) {
+          childHandledIt = true
         }
+      }
+      return childHandledIt
+    },
+
+    emitChange(newValues) {
+      if (this.emitValuesOnReset === true || this.isAfterReset === false) {
+        this.$emit('values-changed', newValues)
+      }
+
+      if (this.isAfterReset) {
+        this.isAfterReset = false
       }
     },
   },

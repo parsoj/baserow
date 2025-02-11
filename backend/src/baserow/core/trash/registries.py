@@ -1,13 +1,16 @@
 from abc import ABC, abstractmethod
-from typing import Any, Optional, List, Dict
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from baserow.core.exceptions import TrashItemDoesNotExist
 from baserow.core.registry import (
+    Instance,
+    ModelInstanceMixin,
     ModelRegistryMixin,
     Registry,
-    ModelInstanceMixin,
-    Instance,
 )
+
+if TYPE_CHECKING:
+    from django.contrib.auth.models import AbstractUser
 
 
 class TrashableItemType(ModelInstanceMixin, Instance, ABC):
@@ -36,7 +39,9 @@ class TrashableItemType(ModelInstanceMixin, Instance, ABC):
 
     @abstractmethod
     def permanently_delete_item(
-        self, trashed_item: Any, trash_item_lookup_cache: Dict[str, Any] = None
+        self,
+        trashed_item: Any,
+        trash_item_lookup_cache: Dict[str, Any] = None,
     ):
         """
         Should be implemented to actually delete the specified trashed item from the
@@ -56,29 +61,33 @@ class TrashableItemType(ModelInstanceMixin, Instance, ABC):
         :returns True if this trash type requires a parent id to lookup a specific item,
             false if only the trash_item_id is required to perform a lookup.
         """
+
         return False
 
     @abstractmethod
-    def get_parent(self, trashed_item: Any, parent_id: int) -> Optional[Any]:
+    def get_parent(self, trashed_item: Any) -> Optional[Any]:
         """
         Returns the parent for this item.
 
         :param trashed_item: The item to lookup a parent for.
         :returns Either the parent item or None if this item has no parent.
         """
+
         pass
 
     @abstractmethod
-    def trashed_item_restored(self, trashed_item: Any, trash_entry):
+    def restore(self, trashed_item: Any, trash_entry):
         """
-        Called when a trashed item is restored, should perform any extra operations
-        such as sending web socket signals which occur when an item is "created" in
-        baserow.
+        Called when a trashed item should be restored. Will set trashed to true and
+        save. Should be overridden if additional actions such as restoring related
+        items or web socket signals are needed.
 
         :param trash_entry: The trash entry that was restored from.
-        :param trashed_item: The item that has been restored.
+        :param trashed_item: The item that to be restored.
         """
-        pass
+
+        trashed_item.trashed = False
+        trashed_item.save()
 
     @abstractmethod
     def get_name(self, trashed_item: Any) -> str:
@@ -87,33 +96,58 @@ class TrashableItemType(ModelInstanceMixin, Instance, ABC):
         modal.
 
         :param trashed_item: The item to be named.
-        :return The name of the trashed_group
+        :return The name of the trashed_item
         """
+
         pass
 
-    # noinspection PyMethodMayBeStatic
-    def get_items_to_trash(self, trashed_item: Any) -> List[Any]:
+    def get_names(self, trashed_item: Any) -> str:
         """
-        When trashing some items you might also need to mark other related items also
-        as trashed. Override this method and return instances of trashable models
-        which should also be marked as trashed. Each of these instances will not
-        however be given their own unique trash entry, but instead be restored
-        all together from a single trash entry made for trashed_item only.
+        Should return an array of names of this particular trashed item to display in
+        the trash modal. This is typically used when multiple items have been deleted
+        in batch and can be visualized differently by the client.
 
-        :return  An iterable of trashable model instances.
+        :param trashed_item: The item to be named.
+        :return The names of the trashed_item.
         """
-        return [trashed_item]
 
-    # noinspection PyMethodMayBeStatic
-    def get_extra_description(
-        self, trashed_item: Any, parent: Optional[Any]
-    ) -> Optional[str]:
-        """
-        Should return an optional extra description to show along with the trash
-        entry for this particular trashed item.
+        pass
 
-        :return A short string giving extra detail on what has been trashed.
+    def trash(self, item_to_trash: Any, requesting_user, trash_entry):
         """
+        Saves trashed=True on the provided item and should be overridden to
+        perform any other cleanup and trashing other items related to
+        item_to_trash.
+
+        :param item_to_trash: The item to be trashed.
+        :param requesting_user: The user who is trashing the item.
+        :param trash_entry: The trash entry useful to save additional data like
+            some related items.
+        """
+
+        item_to_trash.trashed = True
+        item_to_trash.save()
+
+    @abstractmethod
+    def get_restore_operation_type(
+        self,
+    ) -> str:
+        """
+        Returns the operation type used to check permissions for deleting an object
+        of this type.
+        """
+
+        pass
+
+    def get_restore_operation_context(self, trash_entry, trashed_item) -> str:
+        """
+        Returns the context to use when checking permission for restoring an item
+        of this type.
+        """
+
+        return trashed_item
+
+    def get_owner(self, trashed_item: Any) -> Optional["AbstractUser"]:
         return None
 
 

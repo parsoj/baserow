@@ -1,7 +1,8 @@
-import Vuelidate from 'vuelidate'
+import Vuelidate from '@baserow/node_modules/vuelidate/lib/index'
 import Vue from 'vue'
 import Vuex from 'vuex'
-import '@baserow/modules/core/plugins/global'
+import { setupVue } from '@baserow/modules/core/plugins/global'
+import { setupVueForAB } from '@baserow/modules/builder/plugins/global'
 
 const addVuex = (context) => {
   context.vuex = Vuex
@@ -23,13 +24,18 @@ const addBus = (context) => {
   }
   context.vue.use(EventBusPlugin)
 }
+const addI18n = (context) => {
+  context.vueTestUtils.config.mocks.$t = (key) => key
+  context.vueTestUtils.config.mocks.$tc = (key, count) => `${key} - ${count}`
+}
 const compositeConfiguration = (...configs) => {
   return (context) => configs.forEach((config) => config(context))
 }
 
 export const bootstrapVueContext = (configureContext) => {
   configureContext =
-    configureContext || compositeConfiguration(addVuex, addVuelidate, addBus)
+    configureContext ||
+    compositeConfiguration(addVuex, addVuelidate, addBus, addI18n)
 
   const context = {}
   const teardownVueContext = () => {
@@ -46,6 +52,8 @@ export const bootstrapVueContext = (configureContext) => {
       template: '<span><slot /></span>',
     }
     context.vue = context.vueTestUtils.createLocalVue()
+    setupVue(context.vue)
+    setupVueForAB(context.vue)
 
     jest.doMock('vue', () => context.vue)
 

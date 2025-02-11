@@ -8,7 +8,7 @@
         class="api-docs__copy"
         @click.prevent=";[copyToClipboard(url), $refs.urlCopied.show()]"
       >
-        Copy
+        {{ $t('action.copy') }}
         <Copied ref="urlCopied"></Copied>
       </a>
       <div class="api-docs__example-request">
@@ -32,7 +32,9 @@
         </div>
       </div>
     </div>
-    <div class="api-docs__example-title">Request sample</div>
+    <div class="api-docs__example-title">
+      {{ $t('apiDocsExample.requestSample') }}
+    </div>
     <div class="api-docs__example">
       <a
         class="api-docs__copy"
@@ -43,7 +45,7 @@
           ]
         "
       >
-        Copy
+        {{ $t('action.copy') }}
         <Copied ref="requestCopied"></Copied>
       </a>
       <div class="api-docs__example-type">
@@ -67,10 +69,10 @@
         </Dropdown>
         <Checkbox
           v-if="includeUserFieldsCheckbox"
-          :value="value.userFieldNames"
+          :checked="value.userFieldNames"
           class="api-docs__example-type-item"
           @input="$emit('input', { userFieldNames: $event, type: value.type })"
-          >User field names</Checkbox
+          >{{ $t('apiDocsExample.userFieldNames') }}</Checkbox
         >
       </div>
       <div class="api-docs__example-content-container">
@@ -98,7 +100,9 @@
       </div>
     </div>
     <template v-if="response !== false">
-      <div class="api-docs__example-title">Response sample</div>
+      <div class="api-docs__example-title">
+        {{ $t('apiDocsExample.responseSample') }}
+      </div>
       <div class="api-docs__example">
         <a
           class="api-docs__copy"
@@ -109,7 +113,7 @@
             ]
           "
         >
-          Copy
+          {{ $t('action.copy') }}
           <Copied ref="responseCopied"></Copied>
         </a>
         <div class="api-docs__example-content-container">
@@ -157,6 +161,11 @@ export default {
       default: 'GET',
     },
     url: {
+      type: String,
+      required: false,
+      default: '',
+    },
+    fileRequest: {
       type: String,
       required: false,
       default: '',
@@ -215,14 +224,19 @@ export default {
         example += `\n-X ${this.type} \\`
       }
 
-      example += '\n-H "Authorization: Token YOUR_API_KEY" \\'
+      example += '\n-H "Authorization: Token YOUR_DATABASE_TOKEN" \\'
 
       if (this.request !== false) {
         index++
         example += '\n-H "Content-Type: application/json" \\'
       }
 
-      example += `\n${this.url}`
+      if (this.fileRequest !== '') {
+        index++
+        example += ` \\\n-F file=@${this.fileRequest}`
+      }
+
+      example += `\n"${this.url}"`
 
       if (this.request !== false) {
         index++
@@ -244,7 +258,13 @@ export default {
       }
 
       example += `${this.url} HTTP`
-      example += '\nAuthorization: Token YOUR_API_KEY'
+      example += '\nAuthorization: Token YOUR_DATABASE_TOKEN'
+
+      if (this.fileRequest !== '') {
+        example += '\nContent-Length: YOUR_CONTENT_LENGTH'
+        example +=
+          '\nContent-Type: multipart/form-data; boundary=------------------------YOUR_BOUNDARY'
+      }
 
       if (this.request !== false) {
         index += 2
@@ -259,7 +279,14 @@ export default {
     },
     getJavaScriptExample() {
       let index = 5
-      let example = 'axios({'
+      let example = ''
+      if (this.fileRequest !== '') {
+        example += 'const formData = new FormData()'
+        example += `\nformData.append('file', '${this.fileRequest}')`
+        example += "\naxios.post('/fileupload', formData, {"
+      } else {
+        example = 'axios({'
+      }
 
       if (this.type !== '') {
         index++
@@ -268,7 +295,12 @@ export default {
 
       example += `\n  url: "${this.url}",`
       example += '\n  headers: {'
-      example += '\n    Authorization: "Token YOUR_API_KEY"'
+      example += '\n    Authorization: "Token YOUR_DATABASE_TOKEN"'
+
+      if (this.fileRequest !== '') {
+        index++
+        example += ',\n    "Content-Type": "multipart/form-data"'
+      }
 
       if (this.request !== false) {
         index++
@@ -296,7 +328,7 @@ export default {
       example += `\n    "${this.url}",`
 
       example += '\n    headers={'
-      example += `\n        "Authorization": "Token YOUR_API_KEY"`
+      example += `\n        "Authorization": "Token YOUR_DATABASE_TOKEN"`
 
       if (this.request !== false) {
         index++
@@ -304,6 +336,11 @@ export default {
       }
 
       example += '\n    }'
+
+      if (this.fileRequest !== '') {
+        index++
+        example += `\n    files={'file': open('${this.fileRequest}', 'rb')}`
+      }
 
       if (this.request !== false) {
         index++

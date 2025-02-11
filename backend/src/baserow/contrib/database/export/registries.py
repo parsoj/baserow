@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import List, Any, Callable, Type
+from typing import Any, Callable, List
 
 from django.contrib.auth import get_user_model
 
@@ -18,6 +18,21 @@ class TableExporter(Instance, ABC):
     can_export_table returns True a the user will also be allowed export a table
     without specifying a particular view.
     """
+
+    def before_job_create(self, user, table, view, export_options):
+        """
+        This method is called just before an export job is created. It can be used to
+        do some additional checking of the provided values.
+
+        :param user: The user that requested the creation of the job.
+        :type user: User
+        :param table: The table that must be exported.
+        :type table: Table
+        :param view: The view that must be exported.
+        :type view: None or View
+        :param export_options: The additional user provided export options.
+        :type export_options: dict
+        """
 
     @property
     @abstractmethod
@@ -43,7 +58,7 @@ class TableExporter(Instance, ABC):
 
     @property
     @abstractmethod
-    def option_serializer_class(self) -> Type["BaseExporterOptionsSerializer"]:
+    def option_serializer_class(self):
         """
         The serializer used for any exporter specific options this exporter might need.
         These will be passed after validation to the .write_to_file method of the
@@ -52,7 +67,7 @@ class TableExporter(Instance, ABC):
 
     @property
     @abstractmethod
-    def queryset_serializer_class(self) -> Type["QuerysetSerializer"]:
+    def queryset_serializer_class(self):
         """
         A QuerysetSerializer class which implements this table exporter's specific
         type of export.

@@ -1,23 +1,32 @@
-from datetime import datetime
+import typing
+from datetime import datetime, timezone
+from functools import wraps
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pytz import timezone as pytz_timezone
-from pytz.exceptions import UnknownTimeZoneError
+from django.db import OperationalError
 
-from django.utils import timezone
-
-from rest_framework import status
+from rest_framework import serializers, status
 from rest_framework.exceptions import APIException
 
-from .utils import (
-    map_exceptions as map_exceptions_utility,
-    get_request,
-    validate_data,
-    validate_data_custom_fields,
+from baserow.api.errors import (
+    ERROR_FEATURE_DISABLED,
+    ERROR_MAX_LOCKS_PER_TRANSACTION_EXCEEDED,
+    ERROR_PERMISSION_DENIED,
 )
-from .exceptions import RequestBodyValidationException
+from baserow.api.exceptions import RequestBodyValidationException
+from baserow.core.exceptions import (
+    FeatureDisabledException,
+    PermissionException,
+    is_max_lock_exceeded_exception,
+)
+
+from .exceptions import QueryParameterValidationException
+from .utils import ExceptionMappingType, get_request
+from .utils import map_exceptions as map_exceptions_utility
+from .utils import validate_data, validate_data_custom_fields
 
 
-def map_exceptions(exceptions):
+def map_exceptions(exceptions: ExceptionMappingType = None):
     """
     This decorator simplifies mapping specific exceptions to a standard api response.
     Note that this decorator uses the map_exception function from baserow.api.utils
@@ -45,7 +54,58 @@ def map_exceptions(exceptions):
         "error": "ERROR_1",
         "detail": "Other message"
       }
+
+    Example 3:
+      with map_api_exceptions(
+          {
+              SomeException: lambda e: ('ERROR_1', 404, 'Conditional Error')
+              if "something" in str(e)
+              else None
+          }
+      ):
+          raise SomeException('something')
+
+      HTTP/1.1 404
+      {
+        "error": "ERROR_1",
+        "detail": "Conditional Error"
+      }
+
+    Example 4:
+      with map_api_exceptions(
+          {
+              SomeException: lambda e: ('ERROR_1', 404, 'Conditional Error')
+              if "something" in str(e)
+              else None
+          }
+      ):
+          raise SomeException('doesnt match')
+
+      # SomeException will be thrown directly if the provided callable returns None.
     """
+
+    # If a view needs no mappings, but does need the permission
+    # denied mapping, then allow the decorator to be called with
+    # no `exceptions`.
+    if exceptions is None:
+        exceptions = {}
+
+    # Add globally permission denied exception mapping if missing
+    if PermissionException not in exceptions:
+        exceptions[PermissionException] = ERROR_PERMISSION_DENIED
+
+    if FeatureDisabledException not in exceptions:
+        exceptions[FeatureDisabledException] = ERROR_FEATURE_DISABLED
+
+    # Add global `OperationalError` exception mapping if missing.
+    # This is used to detect if `max_locks_per_transaction` has
+    # been exceeded, and in which case we return a specific error.
+    if OperationalError not in exceptions:
+        exceptions[OperationalError] = (
+            lambda e: ERROR_MAX_LOCKS_PER_TRANSACTION_EXCEEDED
+            if is_max_lock_exceeded_exception(e)
+            else None
+        )
 
     def map_exceptions_decorator(func):
         def func_wrapper(*args, **kwargs):
@@ -57,7 +117,76 @@ def map_exceptions(exceptions):
     return map_exceptions_decorator
 
 
-def validate_body(serializer_class, partial=False):
+def validate_query_parameters(
+    serializer: serializers.Serializer, return_validated=False
+):
+    """
+    This decorator can validate the query parameters using a serializer. If the query
+    parameters match the fields on the serializer it will add the query params to the
+    kwargs. If not it will raise an APIException with structured details about what is
+    wrong.
+
+    The name of the field on the serializer must be the name of the expected query
+    parameter in the query string.
+    By passing "required=False" to the serializer field, we allow the query
+    parameter to be unset.
+
+    Example:
+        class MoveRowQueryParamsSerializer(serializers.Serializer):
+            before_id = serializers.IntegerField(required=False)
+
+        @validate_query_parameters(MoveRowQueryParamsSerializer)
+        def patch(self, request, query_params):
+           raise SomeException('This is a test')
+
+        HTTP/1.1 400
+        URL: /api/database/rows/table/11/1/move/?before_id=wrong_type
+        {
+          "error": "ERROR_QUERY_PARAMETER_VALIDATION",
+          "detail": {
+            "before_id": [
+              {
+                "error": "A valid integer is required.",
+                "code": "invalid"
+              }
+            ]
+          }
+        }
+
+    :raises ValueError: When the `query_params` attribute is already in the kwargs. This
+        decorator tries to add the `query_params` attribute, but cannot do that if it is
+        already present.
+    """
+
+    def validate_decorator(func):
+        def func_wrapper(*args, **kwargs):
+            request = get_request(args)
+
+            if "query_params" in kwargs:
+                raise ValueError("The query_params attribute is already in the kwargs.")
+
+            params_dict = request.GET.dict()
+
+            kwargs["query_params"] = validate_data(
+                serializer,
+                params_dict,
+                partial=False,
+                exception_to_raise=QueryParameterValidationException,
+                return_validated=return_validated,
+            )
+
+            return func(*args, **kwargs)
+
+        return func_wrapper
+
+    return validate_decorator
+
+
+def validate_body(
+    serializer_class,
+    partial: bool = False,
+    return_validated: bool = False,
+):
     """
     This decorator can validate the request body using a serializer. If the body is
     valid it will add the data to the kwargs. If not it will raise an APIException with
@@ -87,7 +216,7 @@ def validate_body(serializer_class, partial=False):
 
     :param serializer_class: The serializer that must be used for validating.
     :param partial: Whether partial data passed to the serializer is considered valid.
-    :type serializer_class: Serializer
+    :param return_validated: Whether to inject the validated data after validation.
     :raises ValueError: When the `data` attribute is already in the kwargs. This
         decorator tries to add the `data` attribute, but cannot do that if it is
         already present.
@@ -100,7 +229,12 @@ def validate_body(serializer_class, partial=False):
             if "data" in kwargs:
                 raise ValueError("The data attribute is already in the kwargs.")
 
-            kwargs["data"] = validate_data(serializer_class, request.data, partial)
+            kwargs["data"] = validate_data(
+                serializer_class,
+                request.data,
+                partial,
+                return_validated=return_validated,
+            )
             return func(*args, **kwargs)
 
         return func_wrapper
@@ -109,7 +243,12 @@ def validate_body(serializer_class, partial=False):
 
 
 def validate_body_custom_fields(
-    registry, base_serializer_class=None, type_attribute_name="type", partial=False
+    registry,
+    base_serializer_class=None,
+    type_attribute_name="type",
+    partial=False,
+    allow_empty_type=False,
+    return_validated=False,
 ):
     """
     This decorator can validate the request data dynamically using the generated
@@ -137,9 +276,9 @@ def validate_body_custom_fields(
     def validate_decorator(func):
         def func_wrapper(*args, **kwargs):
             request = get_request(args)
-            type_name = request.data.get(type_attribute_name)
+            type_name = request.data.get(type_attribute_name, None)
 
-            if not type_name:
+            if not type_name and not allow_empty_type:
                 # If the type name isn't provided in the data we will raise a machine
                 # readable validation error.
                 raise RequestBodyValidationException(
@@ -160,6 +299,8 @@ def validate_body_custom_fields(
                 base_serializer_class=base_serializer_class,
                 type_attribute_name=type_attribute_name,
                 partial=partial,
+                allow_empty_type=allow_empty_type,
+                return_validated=return_validated,
             )
             return func(*args, **kwargs)
 
@@ -214,9 +355,8 @@ def allowed_includes(*allowed):
 def accept_timezone():
     """
     This view decorator optionally accepts a timezone GET parameter. If provided, then
-    the timezone is parsed via the pytz package and a now date is calculated with
-    that timezone. A list of supported timezones can be found on
-    https://gist.github.com/heyalexej/8bf688fd67d7199be4a1682b3eec7568.
+    the timezone is parsed via zoneinfo and a now date is calculated with
+    that timezone.
 
     class SomeView(View):
         @accept_timezone()
@@ -224,7 +364,7 @@ def accept_timezone():
             print(now.tzinfo)
 
     HTTP /some-view/?timezone=Etc/GMT-1
-    >>> <StaticTzInfo 'Etc/GMT-1'>
+    >>> <ZoneInfo 'Etc/GMT-1'>
     """
 
     def validate_decorator(func):
@@ -235,18 +375,15 @@ def accept_timezone():
 
             try:
                 kwargs["now"] = (
-                    datetime.utcnow().astimezone(pytz_timezone(timezone_string))
+                    datetime.now(tz=timezone.utc).astimezone(ZoneInfo(timezone_string))
                     if timezone_string
-                    else timezone.now()
+                    else datetime.now(tz=timezone.utc)
                 )
-            except UnknownTimeZoneError:
+            except ZoneInfoNotFoundError:
                 exc = APIException(
                     {
                         "error": "UNKNOWN_TIME_ZONE_ERROR",
-                        "detail": f"The timezone {timezone_string} is not supported. A "
-                        f"list of support timezones can be found on "
-                        f"https://gist.github.com/heyalexej/8bf688fd67d7199be4a1682b3e"
-                        f"ec7568.",
+                        "detail": f"The timezone {timezone_string} is not supported.",
                     }
                 )
                 exc.status_code = status.HTTP_400_BAD_REQUEST
@@ -257,3 +394,50 @@ def accept_timezone():
         return func_wrapper
 
     return validate_decorator
+
+
+def require_request_data_type(*rtypes: typing.Type) -> typing.Callable:
+    """
+    Decorate a view function to restrict allowed request.data to specific types,
+    allowing request.data type checks before actual view is called. This may be
+    required for views that reach to request.data, assuming it's a dict, before doing
+    full validation with a serializer.
+
+    In case of type mismatch decorator raises RequestBodyValidationException with
+    a payload mimicking Serializer's invalid data error.
+
+    >>> class AppView(APIView):
+        @require_request_data_type(dict)
+        def post(self, request):
+            return request.data.keys()
+
+    or using multiple types:
+
+    >>> class AppView(APIView):
+        @require_request_data_type(dict, list)
+        def post(self, request):
+            return request.data.keys()
+    """
+
+    def wrapper(f):
+        @wraps(f)
+        def _wrap(_self, request, *args, **kwargs):
+            if not isinstance(request.data, rtypes):
+                detail = {
+                    "non_field_errors": [
+                        {
+                            "code": "invalid",
+                            "error": (
+                                f"Invalid data. Expected types are: "
+                                f"{','.join([rtype.__name__ for rtype in rtypes])}, "
+                                f"but got {type(request.data).__name__}."
+                            ),
+                        }
+                    ]
+                }
+                raise RequestBodyValidationException(detail=detail, code=None)
+            return f(_self, request, *args, **kwargs)
+
+        return _wrap
+
+    return wrapper

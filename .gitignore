@@ -1,5 +1,4 @@
 .DS_Store
-.idea
 
 # Created by .ignore support plugin (hsz.mobi)
 ### Node template
@@ -21,6 +20,7 @@ lib-cov
 
 # Coverage directory used by tools like istanbul
 coverage
+html_coverage
 
 # nyc test coverage
 .nyc_output
@@ -92,11 +92,58 @@ __pycache__
 
 docker-compose.override.yml
 
-# python virtual envs
+# python
 venv/
-
-# intellij config files
-*.iml
+.profiles/
 
 web-frontend/plugins/
 backend/plugins/
+web-frontend/reports/
+backend/reports/
+backend/.env.testing*
+
+.idea/
+*.iml
+
+!config/intellij/.idea/
+!config/intellij/*.iml
+!config/intellij/**/*.iml
+
+# IntelliJ
+out/
+
+.vagrant/
+
+
+# vscode config files
+.vscode/
+!config/vscode/.vscode/
+
+# cursor editor config files
+.cursor-config/
+!config/cursor/.cursor-config/
+
+# VIM's swap files
+*.swp
+
+formula/out/
+
+.coverage
+junit.xml
+
+.env
+
+!plugin-boilerplate/{{ cookiecutter.project_slug }}/.env
+
+field-diagrams/
+
+*.http
+
+# Intellij needs this package.json to allow running tests from the IDE but this isn't
+# actually a node module and so we ignore it.
+premium/web-frontend/package.json
+.local/
+
+# Storybook
+web-frontend/.nuxt-storybook/
+web-frontend/storybook-static

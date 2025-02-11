@@ -1,7 +1,4 @@
 from .extensions import (  # noqa: F401
-    DiscriminatorMappingSerializerExtension,
     DiscriminatorCustomFieldsMappingSerializerExtension,
+    DiscriminatorMappingSerializerExtension,
 )
-
-
-default_app_config = "baserow.api.config.ApiConfig"

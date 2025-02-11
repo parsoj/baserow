@@ -8,7 +8,12 @@
     @contextmenu="stopContextIfEditing($event)"
   >
     <div v-show="!editing" class="grid-field-text">
-      <a :href="value" target="_blank">{{ value }}</a>
+      <a
+        :href="getHref(value)"
+        target="_blank"
+        rel="nofollow noopener noreferrer"
+        >{{ value }}</a
+      >
     </div>
     <template v-if="editing">
       <input
@@ -27,6 +32,7 @@
 <script>
 import gridField from '@baserow/modules/database/mixins/gridField'
 import gridFieldInput from '@baserow/modules/database/mixins/gridFieldInput'
+import { ensureUrlProtocol } from '@baserow/modules/core/utils/url'
 
 export default {
   mixins: [gridField, gridFieldInput],
@@ -36,6 +42,9 @@ export default {
         this.$refs.input.focus()
         this.$refs.input.selectionStart = this.$refs.input.selectionEnd = 100000
       })
+    },
+    getHref(value) {
+      return ensureUrlProtocol(value)
     },
   },
 }

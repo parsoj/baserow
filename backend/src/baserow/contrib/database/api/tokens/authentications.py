@@ -1,14 +1,14 @@
-from django.utils.translation import gettext_lazy as _
-
 from drf_spectacular.extensions import OpenApiAuthenticationExtension
-
 from rest_framework import HTTP_HEADER_ENCODING
 from rest_framework.authentication import BaseAuthentication, get_authorization_header
 from rest_framework.exceptions import AuthenticationFailed
 
-from baserow.core.exceptions import UserNotInGroup
-from baserow.contrib.database.tokens.handler import TokenHandler
+from baserow.api.sessions import set_user_remote_addr_ip_from_request
 from baserow.contrib.database.tokens.exceptions import TokenDoesNotExist
+from baserow.contrib.database.tokens.handler import TokenHandler
+from baserow.core.exceptions import UserNotInWorkspace
+from baserow.core.sentry import setup_user_in_sentry
+from baserow.core.telemetry.utils import setup_user_in_baggage_and_spans
 
 
 class TokenAuthentication(BaseAuthentication):
@@ -24,12 +24,12 @@ class TokenAuthentication(BaseAuthentication):
             return None
 
         if len(auth) == 1:
-            msg = _("Invalid token header. No token provided.")
+            msg = "Invalid token header. No token provided."
             raise AuthenticationFailed(
                 {"detail": msg, "error": "ERROR_INVALID_TOKEN_HEADER"}
             )
         elif len(auth) > 2:
-            msg = _("Invalid token header. Token string should not contain spaces.")
+            msg = "Invalid token header. Token string should not contain spaces."
             raise AuthenticationFailed(
                 {"detail": msg, "error": "ERROR_INVALID_TOKEN_HEADER"}
             )
@@ -39,13 +39,13 @@ class TokenAuthentication(BaseAuthentication):
 
         try:
             token = handler.get_by_key(decoded_key)
-        except UserNotInGroup:
-            msg = _("The token's user does not belong to the group anymore.")
+        except UserNotInWorkspace:
+            msg = "The token's user does not belong to the group anymore."
             raise AuthenticationFailed(
                 {"detail": msg, "error": "ERROR_TOKEN_GROUP_MISMATCH"}
             )
         except TokenDoesNotExist:
-            msg = _("The provided token does not exist.")
+            msg = "The provided token does not exist."
             raise AuthenticationFailed(
                 {"detail": msg, "error": "ERROR_TOKEN_DOES_NOT_EXIST"}
             )
@@ -58,16 +58,19 @@ class TokenAuthentication(BaseAuthentication):
                 }
             )
 
-        token = handler.update_token_usage(token)
         request.user_token = token
+        set_user_remote_addr_ip_from_request(token.user, request)
+        setup_user_in_baggage_and_spans(token.user, request)
+        setup_user_in_sentry(token.user)
+
         return token.user, token
 
 
 class JSONWebTokenAuthenticationExtension(OpenApiAuthenticationExtension):
     target_class = (
-        "baserow.contrib.database.api.tokens.authentications." "TokenAuthentication"
+        "baserow.contrib.database.api.tokens.authentications.TokenAuthentication"
     )
-    name = "Token"
+    name = "Database token"
     match_subclasses = True
     priority = -1
 

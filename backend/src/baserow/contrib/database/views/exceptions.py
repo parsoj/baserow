@@ -1,11 +1,15 @@
 from baserow.core.exceptions import (
-    InstanceTypeDoesNotExist,
     InstanceTypeAlreadyRegistered,
+    InstanceTypeDoesNotExist,
 )
 
 
 class ViewDoesNotExist(Exception):
     """Raised when trying to get a view that doesn't exist."""
+
+
+class CannotShareViewTypeError(Exception):
+    """Raised when trying to a share a view that cannot be shared"""
 
 
 class ViewNotInTable(Exception):
@@ -36,6 +40,10 @@ class ViewTypeDoesNotExist(InstanceTypeDoesNotExist):
 
 
 class ViewFilterDoesNotExist(Exception):
+    """Raised when trying to get a view filter that does not exist."""
+
+
+class ViewFilterGroupDoesNotExist(Exception):
     """Raised when trying to get a view filter that does not exist."""
 
 
@@ -78,11 +86,94 @@ class ViewSortFieldAlreadyExist(Exception):
 
 
 class ViewSortFieldNotSupported(Exception):
-    """Raised when a field does not supports sorting in a view."""
+    """Raised when a field does not support sorting in a view."""
+
+
+class ViewGroupByDoesNotExist(Exception):
+    """Raised when trying to get a view group by that does not exist."""
+
+
+class ViewGroupByNotSupported(Exception):
+    """Raised when the view type does not support grouping."""
+
+
+class ViewGroupByFieldAlreadyExist(Exception):
+    """Raised when a view group by with the field type already exists."""
+
+
+class ViewGroupByFieldNotSupported(Exception):
+    """Raised when a field does not support grouping in a view."""
 
 
 class ViewDoesNotSupportFieldOptions(Exception):
     """Raised when a view type does not support field options."""
+
+
+class FieldAggregationNotSupported(Exception):
+    """Raised when the view type does not support field aggregation."""
+
+
+class AggregationTypeDoesNotExist(InstanceTypeDoesNotExist):
+    """Raised when trying to get an aggregation type that does not exist."""
+
+
+class AggregationTypeAlreadyRegistered(InstanceTypeAlreadyRegistered):
+    """Raised when trying to register an aggregation type that exists already."""
+
+
+class DecoratorValueProviderTypeDoesNotExist(InstanceTypeDoesNotExist):
+    """Raised when trying to get a decorator value provider type that does not exist."""
+
+
+class DecoratorValueProviderTypeAlreadyRegistered(InstanceTypeAlreadyRegistered):
+    """
+    Raised when trying to register a decorator value provider type that exists
+    already.
+    """
+
+
+class DecoratorTypeDoesNotExist(InstanceTypeDoesNotExist):
+    """Raised when trying to get a decorator type that does not exist."""
+
+
+class DecoratorTypeAlreadyRegistered(InstanceTypeAlreadyRegistered):
+    """
+    Raised when trying to register a decorator type that exists
+    already.
+    """
+
+
+class GridViewAggregationDoesNotSupportField(Exception):
+    """
+    Raised when someone tries to use an aggregation type that doesn't support the
+    given field.
+    """
+
+    def __init__(self, aggregation_type, *args, **kwargs):
+        self.aggregation_type = aggregation_type
+        super().__init__(
+            (
+                f"The aggregation type {aggregation_type} is not compatible with the "
+                " given field."
+            ),
+            *args,
+            **kwargs,
+        )
+
+
+class ViewDecorationDoesNotExist(Exception):
+    """Raised when trying to get a view decoration that does not exist."""
+
+
+class ViewDecorationNotSupported(Exception):
+    """Raised when the view type does not support aggregations."""
+
+
+class DecoratorValueProviderTypeNotCompatible(Exception):
+    """
+    Raised when a value provider type is not compatible with the current
+    decorator.
+    """
 
 
 class FormViewFieldTypeIsNotSupported(Exception):
@@ -95,3 +186,36 @@ class FormViewFieldTypeIsNotSupported(Exception):
             *args,
             **kwargs,
         )
+
+
+class FormViewReadOnlyFieldIsNotSupported(Exception):
+    """Raised when someone tries to enable a read only field."""
+
+    def __init__(self, field_name, *args, **kwargs):
+        self.field_name = field_name
+        super().__init__(
+            f"The field {field_name} is read only and compatible with the form"
+            f"view.",
+            *args,
+            **kwargs,
+        )
+
+
+class NoAuthorizationToPubliclySharedView(Exception):
+    """
+    Raised when someone tries to access a view without a valid authorization
+    token.
+    """
+
+
+class ViewOwnershipTypeDoesNotExist(InstanceTypeDoesNotExist):
+    """
+    Raised when trying to get a view ownership type
+    that does not exist.
+    """
+
+
+class InvalidAPIGroupedFiltersFormatException(ValueError):
+    """
+    Raised when the provided view filters format is invalid.
+    """

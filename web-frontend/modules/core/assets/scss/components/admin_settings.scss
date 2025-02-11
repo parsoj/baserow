@@ -32,7 +32,7 @@
 
 .admin-settings__name {
   font-size: 14px;
-  font-weight: 700;
+  font-weight: 600;
   margin-bottom: 12px;
 }
 
@@ -44,5 +44,9 @@
 
 .admin-settings__control {
   min-width: 0;
-  width: 100%;
+
+  .warning {
+    max-width: 500px;
+    line-height: 18px;
+  }
 }

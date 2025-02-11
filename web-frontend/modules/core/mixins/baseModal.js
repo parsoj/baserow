@@ -5,7 +5,17 @@ export default {
   data() {
     return {
       open: false,
+      // Firefox and Chrome both can both have a different `target` element on `click`
+      // when you release the mouse at different coordinates. Therefore we expect this
+      // variable to be set on mousedown to be consistent.
+      downElement: null,
     }
+  },
+  mounted() {
+    this.$bus.$on('close-modals', this.hide)
+  },
+  beforeDestroy() {
+    this.$bus.$off('close-modals', this.hide)
   },
   destroyed() {
     window.removeEventListener('keyup', this.keyup)
@@ -26,6 +36,12 @@ export default {
       }
     },
     /**
+     * Returns if the modal is open or not.
+     */
+    isOpen() {
+      return this.open
+    },
+    /**
      * Show the modal.
      */
     show() {
@@ -33,12 +49,26 @@ export default {
       this.$emit('show')
       window.addEventListener('keyup', this.keyup)
       document.body.classList.add('prevent-scroll')
+      const mouseDownEvent = (event) => {
+        this.downElement = event.target
+      }
+      document.body.addEventListener('mousedown', mouseDownEvent)
+
+      this.$once('hidden', () => {
+        document.body.removeEventListener('mousedown', mouseDownEvent)
+        document.body.classList.remove('prevent-scroll')
+        window.removeEventListener('keyup', this.keyup)
+      })
     },
     /**
      * Hide the modal.
      */
     hide(emit = true) {
-      // This is a temporary fix. What happens is the model is opened by a context menu
+      if (!this.open) {
+        return
+      }
+
+      // This is a temporary fix. What happens is the modal is opened by a context menu
       // item and the user closes the modal, the element is first deleted and then the
       // click outside event of the context is fired. It then checks if the click was
       // inside one of his children, but because the modal element doesn't exists
@@ -51,16 +81,13 @@ export default {
       if (emit) {
         this.$emit('hidden')
       }
-
-      window.removeEventListener('keyup', this.keyup)
-      document.body.classList.remove('prevent-scroll')
     },
     /**
      * If someone actually clicked on the modal wrapper and not one of his children the
      * modal should be closed.
      */
-    outside(event) {
-      if (event.target === this.$refs.modalWrapper) {
+    outside() {
+      if (this.downElement === this.$refs.modalWrapper && this.canClose) {
         this.hide()
       }
     },
@@ -68,7 +95,7 @@ export default {
      * When the escape key is pressed the modal needs to be hidden.
      */
     keyup(event) {
-      if (event.keyCode === 27) {
+      if (event.key === 'Escape' && this.canClose) {
         this.hide()
       }
     },

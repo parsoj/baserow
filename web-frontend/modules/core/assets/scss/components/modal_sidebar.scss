@@ -2,22 +2,12 @@
   display: flex;
   align-items: center;
   padding: 16px;
+  gap: 16px;
 }
 
 .modal-sidebar__head-icon {
   flex: 0 0 32px;
   margin-right: 16px;
-}
-
-.modal-sidebar__head-initials-icon {
-  flex: 0 0 32px;
-  border-radius: 100%;
-  margin-right: 16px;
-  background-color: $color-primary-500;
-  color: $white;
-  font-weight: 700;
-
-  @include center-text(32px, 13px);
 }
 
 .modal-sidebar__head-name {
@@ -43,14 +33,14 @@
 
 .modal-sidebar__nav-link {
   @extend %ellipsis;
+  @include flex-align-items(10px);
 
   position: relative;
-  display: block;
   height: 42px;
   line-height: 42px;
-  padding: 0 20px 0 50px;
+  padding: 0 20px;
   border-left: solid 4px transparent;
-  color: $color-primary-900;
+  color: $color-neutral-900;
   user-select: none;
 
   &:hover {
@@ -66,11 +56,5 @@
 }
 
 .modal-sidebar__nav-icon {
-  position: absolute;
-  left: 19px;
-  top: 50%;
-  line-height: 14px;
-  margin-top: -7px;
-  text-align: center;
-  width: $fa-fw-width;
+  font-size: 16px;
 }

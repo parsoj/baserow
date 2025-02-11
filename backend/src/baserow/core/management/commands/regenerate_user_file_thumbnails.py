@@ -1,10 +1,10 @@
+from django.core.management.base import BaseCommand
+
 from PIL import Image
 
-from django.core.management.base import BaseCommand
-from django.core.files.storage import default_storage
-
-from baserow.core.user_files.models import UserFile
+from baserow.core.storage import get_default_storage
 from baserow.core.user_files.handler import UserFileHandler
+from baserow.core.user_files.models import UserFile
 
 
 class Command(BaseCommand):
@@ -12,6 +12,15 @@ class Command(BaseCommand):
         "Regenerates all the user file thumbnails based on the current settings. "
         "Existing files will be overwritten."
     )
+
+    def add_arguments(self, parser):
+        parser.add_argument(
+            "name",
+            type=str,
+            nargs="?",
+            help="The name of the thumbnails to regenerate (tiny, small or card_cover).",
+            default=None,
+        )
 
     def handle(self, *args, **options):
         """
@@ -24,6 +33,7 @@ class Command(BaseCommand):
         buffer_size = 100
         queryset = UserFile.objects.filter(is_image=True)
         count = queryset.count()
+        storage = get_default_storage()
 
         while i < count:
             user_files = queryset[i : min(count, i + buffer_size)]
@@ -31,12 +41,15 @@ class Command(BaseCommand):
                 i += 1
 
                 full_path = handler.user_file_path(user_file)
-                stream = default_storage.open(full_path)
+                stream = storage.open(full_path)
 
                 try:
                     image = Image.open(stream)
                     handler.generate_and_save_image_thumbnails(
-                        image, user_file, storage=default_storage
+                        image,
+                        user_file,
+                        storage=storage,
+                        only_with_name=options["name"],
                     )
                     image.close()
                 except IOError:

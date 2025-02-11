@@ -18,11 +18,8 @@ describe('Table Component Tests', () => {
   afterEach(() => testApp.afterEach())
 
   test('Adding a row to a table increases the row count', async () => {
-    const {
-      application,
-      table,
-      gridView,
-    } = await givenASingleSimpleTableInTheServer()
+    const { application, table, gridView } =
+      await givenASingleSimpleTableInTheServer()
 
     const tableComponent = await testApp.mount(Table, {
       asyncDataParams: {
@@ -32,29 +29,34 @@ describe('Table Component Tests', () => {
       },
     })
 
-    expect(tableComponent.html()).toContain('1 rows')
+    expect(tableComponent.html()).toContain('gridView.rowCount - 1')
 
-    mockServer.creatingRowInTableReturns(table, {
-      id: 2,
-      order: '2.00000000000000000000',
-      field_1: '',
-      field_2: '',
-      field_3: '',
-      field_4: false,
+    mockServer.creatingRowsInTableReturns(table, {
+      items: [
+        {
+          id: 2,
+          order: '2.00000000000000000000',
+          field_1: '',
+          field_2: '',
+          field_3: '',
+          field_4: false,
+        },
+      ],
     })
 
     const button = tableComponent.find('.grid-view__add-row')
     await button.trigger('click')
 
-    expect(tableComponent.html()).toContain('2 rows')
+    // Wait a moment until the row is added. This is needed because the store
+    // actions have an await.
+    await new Promise((resolve) => setTimeout(resolve, 100))
+
+    expect(tableComponent.html()).toContain('gridView.rowCount - 2')
   })
 
   test('Searching for a cells value highlights it', async () => {
-    const {
-      application,
-      table,
-      gridView,
-    } = await givenASingleSimpleTableInTheServer()
+    const { application, table, gridView } =
+      await givenASingleSimpleTableInTheServer()
 
     const tableComponent = await testApp.mount(Table, {
       asyncDataParams: {
@@ -86,11 +88,8 @@ describe('Table Component Tests', () => {
   })
 
   test('Editing a search highlighted cells value so it will no longer match warns', async () => {
-    const {
-      application,
-      table,
-      gridView,
-    } = await givenASingleSimpleTableInTheServer()
+    const { application, table, gridView } =
+      await givenASingleSimpleTableInTheServer()
 
     const tableComponent = await testApp.mount(Table, {
       asyncDataParams: {
@@ -120,38 +119,44 @@ describe('Table Component Tests', () => {
     )
 
     await input.setValue('Doesnt Match Search Term')
-    expect(tableComponent.html()).toContain('Row does not match search')
+    expect(tableComponent.html()).toContain('gridViewRow.rowNotMatchingSearch')
 
     await input.setValue('last_name')
-    expect(tableComponent.html()).not.toContain('Row does not match search')
+    expect(tableComponent.html()).not.toContain(
+      'gridViewRow.rowNotMatchingSearch'
+    )
     await flushPromises()
   })
 
   async function givenASingleSimpleTableInTheServer() {
     const table = mockServer.createTable()
-    const { application } = await mockServer.createAppAndGroup(table)
-    const gridView = mockServer.createGridView(application, table)
+    const { application } = await mockServer.createAppAndWorkspace(table)
+    const gridView = mockServer.createGridView(application, table, {})
     const fields = mockServer.createFields(application, table, [
       {
         name: 'Name',
         type: 'text',
         primary: true,
+        read_only: false,
       },
       {
         name: 'Last name',
         type: 'text',
+        read_only: false,
       },
       {
         name: 'Notes',
         type: 'long_text',
+        read_only: false,
       },
       {
         name: 'Active',
         type: 'boolean',
+        read_only: false,
       },
     ])
 
-    mockServer.createRows(gridView, fields, [
+    mockServer.createGridRows(gridView, fields, [
       {
         id: 1,
         order: 0,

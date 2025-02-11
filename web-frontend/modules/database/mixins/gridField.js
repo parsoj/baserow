@@ -1,6 +1,6 @@
-import { isElement } from '@baserow/modules/core/utils/dom'
-import { copyToClipboard } from '@baserow/modules/database/utils/clipboard'
+import { onClickOutside } from '@baserow/modules/core/utils/dom'
 import baseField from '@baserow/modules/database/mixins/baseField'
+import copyPasteHelper from '@baserow/modules/database/mixins/copyPasteHelper'
 
 /**
  * A mixin that can be used by a field grid component. It introduces the props that
@@ -8,7 +8,7 @@ import baseField from '@baserow/modules/database/mixins/baseField'
  * going to be called.
  */
 export default {
-  mixins: [baseField],
+  mixins: [baseField, copyPasteHelper],
   props: {
     /**
      * Indicates if the grid field is in a selected state.
@@ -21,15 +21,10 @@ export default {
       type: Boolean,
       required: true,
     },
-  },
-  data() {
-    return {
-      /**
-       * Timestamp of the last the time the user clicked on the field. We need this to
-       * check if it was double clicked.
-       */
-      clickTimestamp: null,
-    }
+    storePrefix: {
+      type: String,
+      required: true,
+    },
   },
   watch: {
     /**
@@ -60,48 +55,53 @@ export default {
   },
   methods: {
     /**
-     * Adds all the event listeners related to all the field types, for example when a
-     * user presses the one of the arrow keys, tab, backspace, double clicks etc. This
-     * method is not meant to be overwritten.
+     * This method adds an event listener to the given element. It also
+     * automatically removes the event listeners when the cell is unselected
+     * (emitted from `_beforeUnSelect`) so there's no need to do that manually.
      */
-    _select() {
-      this.$el.clickEvent = (event) => {
-        const timestamp = new Date().getTime()
-
-        if (
-          this.clickTimestamp !== null &&
-          timestamp - this.clickTimestamp < 200
-        ) {
-          this.doubleClick(event)
-        }
-
-        this.clickTimestamp = timestamp
-      }
-      this.$el.addEventListener('click', this.$el.clickEvent)
+    addEventListenerWithAutoRemove(el, event, eventHandler) {
+      el.addEventListener(event, eventHandler)
+      this.$once('unselected', () => {
+        el.removeEventListener(event, eventHandler)
+      })
+    },
+    /**
+     * This method is called when the cell is selected to add all the event
+     * listeners needed to handle the user interaction.
+     * It uses the `addEventListenerWithAutoRemove` method to automatically
+     * remove the event listeners when the cell is unselected.
+     */
+    setupAllEventListenersOnCellSelected() {
+      this.addEventListenerWithAutoRemove(
+        this.$el,
+        'dblclick',
+        this.doubleClick
+      )
 
       // Register a body click event listener so that we can detect if a user has
       // clicked outside the field. If that happens we want to unselect the field and
       // possibly save the value.
-      this.$el.clickOutsideEvent = (event) => {
-        if (
-          // Check if the event has the 'preventFieldCellUnselect' attribute which
-          // if true should prevent the field from being unselected.
-          !(
-            'preventFieldCellUnselect' in event &&
-            event.preventFieldCellUnselect
-          ) &&
-          // If the click was outside the column element.
-          !isElement(this.$el, event.target) &&
-          // If the child field allows to unselect when clicked outside.
-          this.canUnselectByClickingOutside(event)
-        ) {
-          this.$emit('unselect')
+      const clickOutsideEventCancel = onClickOutside(
+        this.$el,
+        (target, event) => {
+          if (
+            // Check if the event has the 'preventFieldCellUnselect' attribute which
+            // if true should prevent the field from being unselected.
+            !(
+              'preventFieldCellUnselect' in event &&
+              event.preventFieldCellUnselect
+            ) &&
+            // If the child field allows to unselect when clicked outside.
+            this.canUnselectByClickingOutside(event)
+          ) {
+            this.$emit('unselect')
+          }
         }
-      }
-      document.body.addEventListener('click', this.$el.clickOutsideEvent)
+      )
+      this.$once('unselected', clickOutsideEventCancel)
 
       // Event that is called when a key is pressed while the field is selected.
-      this.$el.keyDownEvent = (event) => {
+      const keyDownEventListener = (event) => {
         // When for example a related modal is open all the key combinations must be
         // ignored because the focus is not in the cell.
         if (!this.canKeyDown(event)) {
@@ -111,65 +111,128 @@ export default {
         // If the tab or arrow keys are pressed we want to select the next field. This
         // is however out of the scope of this component so we emit the selectNext
         // event that the GridView can handle.
-        const { keyCode, ctrlKey, metaKey } = event
+        const { key, shiftKey } = event
         const arrowKeysMapping = {
-          37: 'selectPrevious',
-          38: 'selectAbove',
-          39: 'selectNext',
-          40: 'selectBelow',
+          ArrowLeft: 'selectPrevious',
+          ArrowUp: 'selectAbove',
+          ArrowRight: 'selectNext',
+          ArrowDown: 'selectBelow',
         }
-        if (
-          Object.keys(arrowKeysMapping).includes(keyCode.toString()) &&
-          this.canSelectNext(event)
-        ) {
-          event.preventDefault()
-          this.$emit(arrowKeysMapping[keyCode])
-        }
-        if (keyCode === 9 && this.canSelectNext(event)) {
-          event.preventDefault()
-          this.$emit(event.shiftKey ? 'selectPrevious' : 'selectNext')
-        }
-
-        // Copy the value to the clipboard if ctrl/cmd + c is pressed.
-        if ((ctrlKey || metaKey) && keyCode === 67 && this.canCopy(event)) {
-          const rawValue = this.value
-          const value = this.$registry
-            .get('field', this.field.type)
-            .prepareValueForCopy(this.field, rawValue)
-          copyToClipboard(value)
+        if (this.canSelectNext(event)) {
+          if (Object.keys(arrowKeysMapping).includes(key) && !shiftKey) {
+            event.preventDefault()
+            this.$emit(arrowKeysMapping[key])
+          } else if (key === 'Tab') {
+            event.preventDefault()
+            this.$emit(shiftKey ? 'selectPrevious' : 'selectNext')
+          } else if (key === 'Enter' && shiftKey && !this.readOnly) {
+            event.preventDefault()
+            event.preventFieldCellUnselect = true
+            this.$emit('add-row-after')
+            this.$emit('selectBelow')
+            return
+          }
         }
 
         // Removes the value if the backspace/delete key is pressed.
-        if ((keyCode === 46 || keyCode === 8) && this.canEmpty(event)) {
+        if (
+          (key === 'Delete' || key === 'Backspace') &&
+          this.canKeyboardShortcut(event)
+        ) {
           event.preventDefault()
           const value = this.$registry
             .get('field', this.field.type)
             .getEmptyValue(this.field)
           const oldValue = this.value
-          if (value !== oldValue && !this.readOnly) {
+          if (
+            value !== oldValue &&
+            !this.readOnly &&
+            !this.field._.type.isReadOnly
+          ) {
             this.$emit('update', value, oldValue)
           }
         }
+
+        // Space bar should enlarge the row.
+        if (key === ' ' && this.canKeyboardShortcut(event)) {
+          event.preventDefault()
+          this.$emit('edit-modal')
+        }
       }
-      document.body.addEventListener('keydown', this.$el.keyDownEvent)
+      this.addEventListenerWithAutoRemove(
+        document.body,
+        'keydown',
+        keyDownEventListener
+      )
+
+      const copyEventListener = async (event) => {
+        if (!this.canKeyDown(event) || !this.canKeyboardShortcut(event)) return
+
+        await this.copySelectionToClipboard(
+          Promise.resolve([
+            [this.field],
+            [{ [`field_${this.field.id}`]: this.value }],
+          ])
+        )
+        // prevent Safari from beeping since the window.getSelection() is empty
+        event.preventDefault()
+      }
+      this.addEventListenerWithAutoRemove(window, 'copy', copyEventListener)
 
       // Updates the value of the field when a user pastes something in the field.
-      this.$el.pasteEvent = (event) => {
-        if (!this.canPaste(event)) {
+      const pasteEventListener = async (event) => {
+        if (!this.canKeyboardShortcut(event)) {
           return
         }
 
-        const value = this.$registry
-          .get('field', this.field.type)
-          .prepareValueForPaste(this.field, event.clipboardData)
-        const oldValue = this.value
-        if (value !== oldValue && !this.readOnly) {
-          this.$emit('update', value, oldValue)
+        // Try to call the field handler if one exists
+        if (this.onPaste) {
+          // If the return value of onPaste is true then we must stop event handling
+          // here. It means the event has already been handled.
+          if (this.onPaste(event)) {
+            return
+          }
         }
-      }
-      document.addEventListener('paste', this.$el.pasteEvent)
 
-      this.clickTimestamp = new Date().getTime()
+        try {
+          const [data, jsonData] = await this.extractClipboardData(event)
+          // A grid field cell can only handle one single value. We try to extract
+          // that from the clipboard and update the cell, otherwise we emit the
+          // paste event up.
+          if (data.length === 1 && data[0].length === 1) {
+            const value = this.$registry
+              .get('field', this.field.type)
+              .prepareValueForPaste(
+                this.field,
+                data[0][0],
+                jsonData !== null ? jsonData[0][0] : undefined
+              )
+            const oldValue = this.value
+
+            if (
+              value !== undefined &&
+              value !== oldValue &&
+              !this.readOnly &&
+              !this.field._.type.isReadOnly
+            ) {
+              this.$emit('update', value, oldValue)
+            }
+          } else {
+            // This is a multi cell paste
+            event.stopPropagation()
+            this.$emit('paste', { textData: data, jsonData })
+          }
+        } catch (e) {}
+      }
+      this.addEventListenerWithAutoRemove(document, 'paste', pasteEventListener)
+    },
+    /**
+     * Adds all the event listeners related to all the field types, for example when a
+     * user presses the one of the arrow keys, tab, backspace, double clicks etc. This
+     * method is not meant to be overwritten.
+     */
+    _select() {
+      this.setupAllEventListenersOnCellSelected()
       this.select()
 
       // Emit the selected event so that the parent component can take an action like
@@ -180,12 +243,8 @@ export default {
      * Removes all the listeners related to all field types.
      */
     _beforeUnSelect() {
-      this.$el.removeEventListener('click', this.$el.clickEvent)
-      document.body.removeEventListener('click', this.$el.clickOutsideEvent)
-      document.body.removeEventListener('keydown', this.$el.keyDownEvent)
-      document.removeEventListener('paste', this.$el.pasteEvent)
       this.beforeUnSelect()
-      this.$emit('unselected', {})
+      this.$emit('unselected', { component: this })
     },
     /**
      * Method that is called when the column is selected. For example when clicked
@@ -213,32 +272,6 @@ export default {
       return true
     },
     /**
-     * If the user presses ctrl/cmd + c while a field is selected, the value is
-     * going to be copied to the clipboard. In some cases, for example when the user
-     * is editing the value, we do not want to copy the value. If false is returned
-     * the value won't be copied.
-     */
-    canCopy() {
-      return true
-    },
-    /**
-     * If the user presses ctrl/cmd + v while a field is selected, the value is
-     * overwritten with the data of the clipboard. In some cases, for example when the
-     * user is editing the value, we do not want to change the value. If false is
-     * returned the value won't be changed.
-     */
-    canPaste() {
-      return true
-    },
-    /**
-     * If the user presses delete or backspace while a field is selected, the value is
-     * deleted. In some cases, for example when the user is editing the value, we do
-     * not want to delete the value. If false is returned the value won't be changed.
-     */
-    canEmpty() {
-      return true
-    },
-    /**
      * If the user clicks outside the cell, the cell is automatically unselected. In
      * some cases, for example when you have a context menu as helper, you might not
      * want to unselect when the user clicks in the context menu. The can be
@@ -254,6 +287,15 @@ export default {
      * backspace/delete key should not empty the field at that moment.
      */
     canKeyDown() {
+      return true
+    },
+    /**
+     * If the user presses a keyboard shortcut like ctrl/cmd + v or spacebar while a
+     * field is selected In some cases, for example when the user is editing the
+     * value, we do not want to allow the keyboard shortcut to work. If false it will
+     * be disabled.
+     */
+    canKeyboardShortcut() {
       return true
     },
   },

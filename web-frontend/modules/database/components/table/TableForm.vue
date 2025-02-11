@@ -1,24 +1,27 @@
 <template>
   <form @submit.prevent="submit">
-    <div class="control">
-      <label class="control__label">
-        <i class="fas fa-font"></i>
-        Name
-      </label>
-      <div class="control__elements">
-        <input
-          ref="name"
-          v-model="values.name"
-          :class="{ 'input--error': $v.values.name.$error }"
-          type="text"
-          class="input input--large"
-          @blur="$v.values.name.$touch()"
-        />
-        <div v-if="$v.values.name.$error" class="error">
-          This field is required.
-        </div>
-      </div>
-    </div>
+    <FormGroup
+      :error="fieldHasErrors('name')"
+      required
+      small-label
+      class="margin-bottom-2"
+    >
+      <template #label>
+        <i class="iconoir-text"></i> {{ $t('tableForm.name') }}</template
+      >
+      <FormInput
+        ref="name"
+        v-model="values.name"
+        size="large"
+        :error="fieldHasErrors('name')"
+        @focus.once="$event.target.select()"
+        @blur="$v.values.name.$touch()"
+      >
+      </FormInput>
+      <template #error>
+        {{ $t('error.requiredField') }}
+      </template>
+    </FormGroup>
     <slot></slot>
   </form>
 </template>
@@ -31,20 +34,33 @@ import form from '@baserow/modules/core/mixins/form'
 export default {
   name: 'TableForm',
   mixins: [form],
+  props: {
+    defaultName: {
+      type: String,
+      required: false,
+      default: '',
+    },
+  },
   data() {
     return {
+      allowedValues: ['name'],
       values: {
-        name: '',
+        name: this.defaultName,
       },
     }
   },
-  validations: {
-    values: {
-      name: { required },
-    },
-  },
   mounted() {
     this.$refs.name.focus()
+  },
+  validations: {
+    values: {
+      name: {
+        // No object-shorthand here to access vm properties
+        required: function (value) {
+          return required(value)
+        },
+      },
+    },
   },
 }
 </script>

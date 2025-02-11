@@ -2,7 +2,7 @@
 
 A view is an abstraction that defines how table data is displayed to a user. More 
 information about this can be found on the 
-[database plugin page](../getting-started/database-plugin.md). This is a tutorial about 
+[database plugin page](../technical/database-plugin.md). This is a tutorial about 
 how to create your own custom table view type for Baserow via a plugin. We are going to
 create a calendar view that doesn't really do anything. In the end the user can create 
 a new calendar view that only shows a hello world message. We expect that you are 
@@ -67,8 +67,12 @@ class PluginNameConfig(AppConfig):
 Don't forget to create and apply the migrations because we have created a new model.
 
 ```
-$ baserow makemigrations my_baserow_plugin
-$ baserow migrate 
+# Set these env vars to make sure mounting your source code into the container uses
+# the correct user and permissions.
+export PLUGIN_BUILD_UID=$(id -u)
+export PLUGIN_BUILD_GID=$(id -g)
+docker-compose -f docker-compose.dev.yml run --rm my-baserow-plugin backend-cmd manage makemigrations
+docker-compose -f docker-compose.dev.yml run --rm my-baserow-plugin backend-cmd manage migrate
 ```
 
 ## Web frontend
@@ -114,7 +118,7 @@ export default {
 ```
 
 You can inspect the `web-frontend/modules/database/viewTypes.js::ViewType` for all the
-methods and properties that can be overriden here. The component that is returned by
+methods and properties that can be overridden here. The component that is returned by
 the `getComponent` method is will be added to the body of the page when a view of this
 type is selected.
 
@@ -129,7 +133,7 @@ export class CalendarViewType extends ViewType {
   }
 
   getIconClass() {
-    return 'calendar'
+    return 'iconoir-calendar'
   }
 
   getName() {
@@ -147,9 +151,10 @@ plugins/my_baserow_plugin/web-frontend/plugin.js
 import { PluginNamePlugin } from '@my-baserow-plugin/plugins'
 import { CalendarViewType } from '@my-baserow-plugin/viewTypes'
 
-export default ({ store, app }) => {
-  app.$registry.register('plugin', new PluginNamePlugin())
-  app.$registry.register('view', new CalendarViewType())
+export default (context) => {
+  const { app } = context
+  app.$registry.register('plugin', new PluginNamePlugin(context))
+  app.$registry.register('view', new CalendarViewType(context))
 }
 ```
 

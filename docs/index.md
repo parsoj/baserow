@@ -8,29 +8,82 @@ experience while keeping it easy for developers to write plugins and maintain th
 codebase. The developer documentation contains several topics you might need as a
 developer.
 
-## Getting started
+## Installation
 
-New to Baserow? This is the place to start.
+We provide a hosted version of Baserow which you can sign up and start using immediately
+at [https://baserow.io](https://baserow.io). Alternatively you can easily self-host
+Baserow by following one the guides below:
 
-* [Introduction](./getting-started/introduction.md): An introduction to some important
-  concepts before using Baserow.
-* [API](./getting-started/api.md): An introduction to the REST API and information about
+* [Install with Docker](installation/install-with-docker.md): A step-by-step guide to
+  install Baserow using docker.
+* [Install with Docker Compose](installation/install-with-docker-compose.md): A
+  step-by-step guide to install Baserow using Docker Compose.
+* [Install with Helm](installation/install-with-helm.md): A community maintained helm 
+  chart for installing Baserow on a K8S cluster easily.
+* [Install on AWS](installation/install-on-aws.md): An overview of your options to 
+  install Baserow on AWS with two specific guides for ECS.
+* [Install using Standalone images](installation/install-using-standalone-images.md): A
+  general overview on how to run the Baserow standalone service images with your own
+  container orchestration software.
+* [Install on Cloudron](installation/install-on-cloudron.md): Instructions to manually
+  install Baserow on Cloudron.
+* [Install on Heroku](installation/install-on-heroku.md): A step-by-step guide to
+  install Baserow using Heroku.
+* [Install on Render](installation/install-on-render.md): A step-by-step guide to
+  install Baserow using Render a Heroku alternative.
+* [Install on Digital Ocean Apps](installation/install-on-digital-ocean.md):
+  Instructions on how to install on Digital Ocean Apps platform.
+* [Install on Railway](installation/install-on-railway.md): A step-by-step guide to
+  install Baserow on Railway.
+* [Install on Ubuntu](installation/install-on-ubuntu.md): Instructions on how to install
+  Docker and use it to install Baserow on a fresh ubuntu install.
+* [Third party hosting providers](installation/third-party-hosting-providers.md): A list
+  of hosting/deployment providers that allow to easily self-host Baserow.
+* [Install with Traefik](installation/install-with-traefik.md): How to configure Baserow
+  when using Traefik.
+* [Install with K8S](installation/install-with-k8s.md): An example performant 
+  production ready K8S configuration for use as a starting point.
+* [Install behind Nginx](installation/install-behind-nginx.md): How to configure Baserow
+  when using a Nginx reverse proxy.
+* [Install behind Apache](installation/install-behind-apache.md): How to configure Baserow
+  when using an Apache reverse proxy.
+* [DEPRECATED: Install on Ubuntu](installation/old-install-on-ubuntu.md): A deprecated
+  and now unsupported guide on how to manually install Baserow and its required services
+  on a fresh Ubuntu install. Please use the guides above instead.
+* [Supported runtime dependencies and environments](installation/supported.md): Learn about
+  the supported and recommended runtime dependencies.
+* [Monitoring Baserow](installation/monitoring.md): Learn how to monitor your Baserow
+  server using open telemetry.
+
+## Baserow Tutorials
+
+* [Understanding Baserow Formulas](tutorials/understanding-baserow-formulas.md): A
+  tutorial explaining how to use the formula field in Baserow.
+* [Debugging Connection Issues](tutorials/debugging-connection-issues.md): A guide
+  to help you troubleshoot and resolve common connection issues in Baserow.
+
+## API Usage
+
+Baserow provides various APIs detailed below:
+
+* [REST API](apis/rest-api.md): An introduction to the REST API and information about
   API resources.
-* [WebSocket API](./getting-started/web-socket-api.md): An introduction to the
-  WebSockets API which is used to broadcast real time updates.
-* [Database plugin](./getting-started/database-plugin.md) An introduction to the
-  database plugin which is installed by default.
+* [WebSocket API](apis/web-socket-api.md): An introduction to the WebSockets API which
+  is used to broadcast real time updates.
 
-## Guides
+## Technical Overviews
 
-Need some help with setting things up?
-
-* [Running Locally](guides/running-baserow-locally.md): A step-by-step guide to run
-  Baserow on your computer.
-* [Install on Cloudron](guides/installation/install-on-cloudron.md): Instructions
-  to manually install Baserow on Cloudron.
-* [Install on Ubuntu](./guides/installation/install-on-ubuntu.md): A step-by-step guide
-  to install Baserow on an Ubuntu server.
+* [Introduction](technical/introduction.md): An introduction to some important technical
+  concepts in Baserow.
+* [Database plugin](technical/database-plugin.md) An introduction to the database plugin
+  which is installed by default.
+* [Formula Technical Guide](technical/formula-technical-guide.md): A more technical
+  guide about formulas aimed at developers who want to understand and work with
+  internals of Baserow formulas.
+* [Undo Redo Technical Guide](technical/undo-redo-guide.md): How Baserow implements undo
+  redo technically.
+* [Permissions handling Guide](technical/permissions-guide.md): How Baserow implements
+  permission checking technically.
 
 ## Development
 
@@ -46,21 +99,20 @@ Everything related to contributing and developing for Baserow.
   use them.
 * [Code quality](./development/code-quality.md): More information about the code style,
   quality, choices we made, and how we enforce them.
+* [Debugging](./development/debugging.md): Debugging tools and how to use them.
 * [Create a template](./development/create-a-template.md): Create a template that can be
   previewed and installed by others.
 * [dev.sh](./development/dev_sh.md): Further details on how to use Baserow's `./dev.sh`
   helper script.
-
-## FAQs 
-
-* [Baserow Docker How To](./guides/baserow-docker-how-to.md): Common operations and
-  solutions for working with baserow's docker environments.
-
-## Reference 
-
-* [Baserow Docker API](./reference/baserow-docker-api.md): An API reference with all
-  supported environment variables, command line arguments and usage patterns for
-  Baserow's docker images and compose files.
+* [IntelliJ setup](./development/intellij-setup.md): How to configure Intellij to work
+  well with Baserow for development purposes.
+* [Feature flags](./development/feature-flags.md): How Baserow uses basic feature flags for optionally
+  enabling unfinished or unready features.
+* [E2E Testing](./development/e2e-testing.md): How to run Baserow's end-to-end tests 
+  and when to add your own.
+* [Metrics and Logs](./development/metrics-and-logs.md): How to work with metrics and logs
+  to aid with monitoring Baserow as a developer.
+* [Backend Tests](development/running-tests.md): A guide on how to run python tests for the backend.
 
 ## Plugins
 

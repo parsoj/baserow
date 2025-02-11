@@ -1,11 +1,11 @@
 .api-docs__example-title {
   color: $white;
   font-size: 18px;
-  font-weight: 700;
+  font-weight: 600;
   margin: 20px 0;
 
   @media screen and (max-width: $api-docs-breakpoint) {
-    color: $color-primary-900;
+    color: $color-neutral-900;
   }
 }
 
@@ -23,7 +23,7 @@
 .api-docs__copy {
   position: relative;
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 600;
   color: $color-neutral-500;
 
   @include absolute(20px, 20px, auto, auto);
@@ -74,9 +74,8 @@
 .api-docs__example-type {
   width: 400px;
   margin-bottom: 20px;
-  padding: 16px 16px 0 16px;
+  padding: 16px 16px 0;
   display: flex;
-  align-items: baseline;
 }
 
 .api-docs__example-type-item {

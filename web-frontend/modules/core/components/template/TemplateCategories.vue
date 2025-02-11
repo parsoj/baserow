@@ -1,17 +1,16 @@
 <template>
   <div class="templates__sidebar">
     <slot></slot>
-    <div class="templates__sidebar-title">Templates</div>
+    <div class="templates__sidebar-title">
+      {{ $t('templateCategories.title') }}
+    </div>
     <div class="templates__search">
-      <div class="input__with-icon input__with-icon--left">
-        <input
-          v-model="search"
-          type="text"
-          class="input"
-          placeholder="Search templates"
-        />
-        <i class="fas fa-search"></i>
-      </div>
+      <FormInput
+        ref="searchInput"
+        v-model="search"
+        icon-left="iconoir-search"
+        :placeholder="$t('templateCategories.search')"
+      ></FormInput>
     </div>
     <ul class="templates__categories">
       <li
@@ -22,11 +21,16 @@
           'templates__category--open': category.id === selectedCategoryId,
         }"
       >
-        <a
-          class="templates__category-link"
-          @click="selectCategory(category.id)"
-          >{{ category.name }}</a
-        >
+        <a class="templates__category-link" @click="selectCategory(category.id)"
+          >{{ category.name }}
+          <i
+            class="templates__category-link-caret-right iconoir-nav-arrow-right"
+          ></i>
+          <i
+            class="templates__category-link-caret-down iconoir-nav-arrow-down"
+          ></i>
+        </a>
+
         <ul class="templates__templates">
           <li
             v-for="template in category.templates"
@@ -41,8 +45,10 @@
               class="templates__template-link"
               @click="$emit('selected', { template, category })"
             >
-              <i class="fas fa-fw" :class="'fa-' + template.icon"></i>
-              {{ template.name }}
+              <i :class="template.icon"></i>
+              <span class="templates__template-link-text">{{
+                template.name
+              }}</span>
             </a>
           </li>
         </ul>
@@ -61,6 +67,22 @@ export default {
     selectedTemplate: {
       required: true,
       validator: (prop) => typeof prop === 'object' || prop === null,
+    },
+  },
+  mounted() {
+    this.$priorityBus.$on(
+      'start-search',
+      this.$priorityBus.level.HIGH,
+      this.searchStarted
+    )
+  },
+  beforeDestroy() {
+    this.$priorityBus.$off('start-search', this.searchStarted)
+  },
+  methods: {
+    searchStarted({ event }) {
+      event.preventDefault()
+      this.$refs.searchInput.focus()
     },
   },
 }

@@ -8,31 +8,31 @@
       }"
       @click="$refs.context.toggle($refs.contextLink, 'bottom', 'left', 4)"
     >
-      <i class="header__filter-icon fas fa-sort"></i>
-      <span class="header__filter-name">{{ sortTitle }}</span>
+      <i class="header__filter-icon iconoir-sort"></i>
+      <span class="header__filter-name">{{
+        $tc('viewSort.sort', view.sortings.length, {
+          count: view.sortings.length,
+        })
+      }}</span>
     </a>
     <ViewSortContext
       ref="context"
       :view="view"
       :fields="fields"
-      :primary="primary"
       :read-only="readOnly"
+      :disable-sort="disableSort"
       @changed="$emit('changed')"
     ></ViewSortContext>
   </div>
 </template>
 
 <script>
-import ViewSortContext from './ViewSortContext'
+import ViewSortContext from '@baserow/modules/database/components/view/ViewSortContext'
 
 export default {
   name: 'ViewSort',
   components: { ViewSortContext },
   props: {
-    primary: {
-      type: Object,
-      required: true,
-    },
     fields: {
       type: Array,
       required: true,
@@ -45,17 +45,10 @@ export default {
       type: Boolean,
       required: true,
     },
-  },
-  computed: {
-    sortTitle() {
-      const numberOfSortings = this.view.sortings.length
-      if (numberOfSortings === 0) {
-        return 'Sort'
-      } else if (numberOfSortings === 1) {
-        return `${numberOfSortings} Sort`
-      } else {
-        return `${numberOfSortings} Sorts`
-      }
+    disableSort: {
+      type: Boolean,
+      required: false,
+      default: false,
     },
   },
 }

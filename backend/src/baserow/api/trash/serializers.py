@@ -1,10 +1,11 @@
 from django.utils.functional import lazy
+
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema_field
-from rest_framework import serializers, fields
+from rest_framework import fields, serializers
 
 from baserow.api.mixins import UnknownFieldRaisesExceptionSerializerMixin
-from baserow.core.models import TrashEntry, Application
+from baserow.core.models import Application, TrashEntry
 from baserow.core.trash.registries import trash_item_type_registry
 
 
@@ -26,7 +27,7 @@ class TrashStructureApplicationSerializer(serializers.ModelSerializer):
         fields = ("id", "name", "trashed")
 
 
-class TrashStructureGroupSerializer(serializers.Serializer):
+class TrashStructureWorkspaceSerializer(serializers.Serializer):
     id = serializers.IntegerField(min_value=0)
     trashed = serializers.BooleanField()
     name = serializers.CharField()
@@ -34,7 +35,9 @@ class TrashStructureGroupSerializer(serializers.Serializer):
 
 
 class TrashStructureSerializer(serializers.Serializer):
-    groups = TrashStructureGroupSerializer(many=True)
+    workspaces = TrashStructureWorkspaceSerializer(
+        many=True, help_text="An array of workspace trash structure records"
+    )
 
 
 class TrashContentsSerializer(serializers.ModelSerializer):
@@ -57,8 +60,8 @@ class TrashContentsSerializer(serializers.ModelSerializer):
             "parent_trash_item_id",
             "trashed_at",
             "application",
-            "group",
+            "workspace",
             "name",
+            "names",
             "parent_name",
-            "extra_description",
         )

@@ -1,6 +1,6 @@
 <template>
   <div class="switch" :class="classNames" @click="toggle(value)">
-    <slot></slot>
+    <div v-if="hasSlot" class="switch__label"><slot></slot></div>
   </div>
 </template>
 
@@ -8,33 +8,50 @@
 export default {
   name: 'SwitchInput',
   props: {
+    /**
+     * The value of the switch.
+     */
     value: {
       type: [Boolean, Number],
       required: false,
       default: false,
     },
-    large: {
+    /**
+     * The size of the switch.
+     */
+    small: {
       type: Boolean,
       required: false,
       default: false,
     },
+    /**
+     * Whether the switch is disabled.
+     */
     disabled: {
       type: Boolean,
       required: false,
       default: false,
     },
+    color: {
+      type: String,
+      required: false,
+      validator: function (value) {
+        return ['green', 'neutral'].includes(value)
+      },
+      default: 'green',
+    },
   },
   computed: {
+    hasSlot() {
+      return !!this.$slots.default
+    },
     classNames() {
       return {
-        'switch--has-content': Object.prototype.hasOwnProperty.call(
-          this.$slots,
-          'default'
-        ),
-        'switch--large': this.large,
+        'switch--small': this.small,
         'switch--disabled': this.disabled,
-        active: this.value === true,
-        unknown: this.value !== true && this.value !== false,
+        'switch--active': this.value,
+        'switch--indeterminate': this.value !== true && this.value !== false,
+        [`switch--color-${this.color}`]: true,
       }
     },
   },

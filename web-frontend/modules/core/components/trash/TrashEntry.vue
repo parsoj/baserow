@@ -9,18 +9,26 @@
     </div>
     <div class="trash-entry__content">
       <div class="trash-entry__name">
-        {{ trashEntry.user_who_trashed || 'A Deleted User' }} Deleted
-        {{ trashEntry.trash_item_type }}
-        <strong>{{ trashItemTitle }}</strong>
-        {{ trashEntry.parent_name ? ' from ' + trashEntry.parent_name : '' }}
+        {{
+          $t('trashEntry.name', {
+            user: trashEntry.user_who_trashed || $t('trashEntry.deletedUser'),
+            type: $t('trashType.' + trashEntry.trash_item_type),
+            title: trashItemTitle,
+            parent: trashEntry.parent_name
+              ? $t('trashEntry.fromParent', { parent: trashEntry.parent_name })
+              : '',
+          })
+        }}
       </div>
       <div class="trash-entry__deleted-at-display">{{ timeAgo }}</div>
-      <span
-        v-if="trashEntry.extra_description"
-        class="trash-entry__extra-description"
-      >
-        {{ trashEntry.extra_description }}
-      </span>
+      <ul v-if="trashEntry.names" class="trash-entry__items">
+        <li v-for="(name, index) in firstNames" :key="index">
+          {{ name }}
+        </li>
+        <li v-if="otherNamesCount">
+          {{ $t('trashEntry.andMore', { count: otherNamesCount }) }}
+        </li>
+      </ul>
     </div>
     <div class="trash-entry__actions">
       <a
@@ -29,7 +37,7 @@
         :class="{ 'trash-entry__action--loading': trashEntry.loading }"
         @click="emitRestoreIfNotLoading"
       >
-        {{ trashEntry.loading ? '' : 'Restore' }}
+        {{ trashEntry.loading ? '' : $t('trashEntry.restore') }}
       </a>
     </div>
   </div>
@@ -41,7 +49,7 @@
  * trashed entry. Shows extra information about the entry like it's name, who trashed it
  * , how long ago it was trashed etc.
  */
-import moment from 'moment'
+import moment from '@baserow/modules/core/moment'
 
 export default {
   name: 'TrashEntry',
@@ -65,15 +73,21 @@ export default {
     },
     trashItemTitle() {
       if (this.trashEntry.name === '') {
-        return (
-          'Unnamed ' +
-          this.trashEntry.trash_item_type +
-          ' ' +
-          this.trashEntry.trash_item_id
-        )
+        return this.$t('trashEntry.unnamed', {
+          type: this.$t('trashType.' + this.trashEntry.trash_item_type),
+          id: this.trashEntry.trash_item_id,
+        })
       } else {
         return this.trashEntry.name
       }
+    },
+    firstNames() {
+      return this.trashEntry.names.slice(0, 10)
+    },
+    otherNamesCount() {
+      return this.trashEntry.names.length > 10
+        ? this.trashEntry.names.length - 10
+        : 0
     },
   },
   methods: {

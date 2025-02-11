@@ -1,26 +1,23 @@
 from drf_spectacular.openapi import OpenApiSerializerFieldExtension
-
-from django.utils.translation import gettext_lazy as _
-
 from rest_framework import serializers
 
-from baserow.contrib.database.tokens.models import Token
 from baserow.contrib.database.models import Database
 from baserow.contrib.database.table.models import Table
+from baserow.contrib.database.tokens.models import Token
 
 from .schemas import token_permissions_field_schema
 
 
 class TokenPermissionsField(serializers.Field):
     default_error_messages = {
-        "invalid_key": _("Only create, read, update and delete keys are allowed."),
-        "invalid_value": _(
+        "invalid_key": "Only create, read, update and delete keys are allowed.",
+        "invalid_value": (
             "The value must either be a bool, or a list containing database or table "
             'ids like [["database", 1], ["table", 1]].'
         ),
-        "invalid_instance_type": _(
-            "The instance type can only be a database or table."
-        ),
+        "invalid_instance_type": "The instance type can only be a database or table.",
+        "invalid_table_id": "The table id {instance_id} is not valid.",
+        "invalid_database_id": "The database id {instance_id} is not valid.",
     }
     valid_types = ["create", "read", "update", "delete"]
 
@@ -106,8 +103,12 @@ class TokenPermissionsField(serializers.Field):
             if isinstance(value, list):
                 for index, (instance_type, instance_id) in enumerate(value):
                     if instance_type == "database":
+                        if instance_id not in databases:
+                            self.fail("invalid_database_id", instance_id=instance_id)
                         data[key][index] = databases[instance_id]
                     elif instance_type == "table":
+                        if instance_id not in tables:
+                            self.fail("invalid_table_id", instance_id=instance_id)
                         data[key][index] = tables[instance_id]
 
         return {
@@ -185,7 +186,7 @@ class TokenSerializer(serializers.ModelSerializer):
         fields = (
             "id",
             "name",
-            "group",
+            "workspace",
             "key",
             "permissions",
         )
@@ -199,7 +200,7 @@ class TokenCreateSerializer(serializers.ModelSerializer):
         model = Token
         fields = (
             "name",
-            "group",
+            "workspace",
         )
 
 

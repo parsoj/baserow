@@ -1,13 +1,11 @@
+from django.conf import settings
+
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
-from drf_spectacular.utils import extend_schema_field
-from drf_spectacular.types import OpenApiTypes
-
-from django.conf import settings
-from django.core.files.storage import default_storage
-from django.utils.translation import gettext_lazy as _
-
 from baserow.core.models import UserFile
+from baserow.core.storage import get_default_storage
 from baserow.core.user_files.handler import UserFileHandler
 
 
@@ -24,9 +22,10 @@ class UserFileURLAndThumbnailsSerializerMixin(serializers.Serializer):
 
     @extend_schema_field(OpenApiTypes.URI)
     def get_url(self, instance):
+        storage = get_default_storage()
         name = self.get_instance_attr(instance, "name")
         path = UserFileHandler().user_file_path(name)
-        url = default_storage.url(path)
+        url = storage.url(path)
         return url
 
     @extend_schema_field(OpenApiTypes.OBJECT)
@@ -35,10 +34,11 @@ class UserFileURLAndThumbnailsSerializerMixin(serializers.Serializer):
             return None
 
         name = self.get_instance_attr(instance, "name")
+        storage = get_default_storage()
 
         return {
             thumbnail_name: {
-                "url": default_storage.url(
+                "url": storage.url(
                     UserFileHandler().user_file_thumbnail_path(name, thumbnail_name)
                 ),
                 "width": size[0],
@@ -96,8 +96,8 @@ class UserFileField(serializers.Field):
     """
 
     default_error_messages = {
-        "invalid_value": _("The value must be an object containing the file name."),
-        "invalid_user_file": _("The provided user file does not exist."),
+        "invalid_value": "The value must be an object containing the file name.",
+        "invalid_user_file": "The provided user file does not exist.",
     }
 
     def __init__(self, *args, **kwargs):

@@ -23,10 +23,8 @@ This whole directory is also added to the backend container.
   source directory. This file is registered as a command via the `setup.py`. When 
   someone adds Baserow as a dependency they can use the command `baserow migrate` which
   is the same as `python src/baserow/manage.py migrate`.
-* `Dockerfile`: the dockerfile that is used to build the image of the 
-  backend for running baserow on your local machine.
-* `docker/Dockerfile.dev`: the dockerfile that is used to build the development image 
-  of the backend.
+* `Dockerfile`: Builds an image containing just the backend service, build with 
+   `--target dev` to instead get a dev ready image.
 * `Makefile`: contains a few commands to install the dependencies, run the linter and
   run the tests.
 * `pytest.ini`: pytest configuration when running the tests.
@@ -39,20 +37,20 @@ The src directory contains the full source code of the Baserow backend module.
 * `api`: is a Django app that exposes Baserow via a REST API. Even though it is an 
   optional app it is installed by default. It's highly recommended to use this package.
   It contains several directories each with their urls, views, serializers, and errors 
-  related to a specific part. For example, the groups and application both have their 
+  related to a specific part. For example, the workspaces and application both have their 
   own directory. There are also several modules that contain some generic classes, 
   functions, and decorators that are reused throughout the code. The `urls.py` module
   is included by the root url config under the namespace `api`.
 * `config`: is a module that contains base settings and some settings that are for
    specific environments. It also contains the root url config that includes the api 
-   under the namespace `api` and adds a `_health` route for health checking. There is
+   under the namespace `api`. There is
    also a wsgi.py file which can be used to expose the applications.
 * `contrib`: contains extra apps that can be installed. For now it only contains the
   backend part of the database plugin. This app is installed by default, but it is
   optional.
 * `core`: is a required app that is installed by default. It contains some abstract
   concepts that are reused throughout the backend. It also contains the code for the 
-  group and application concepts that are at the core of Baserow. Of course there are
+  workspace and application concepts that are at the core of Baserow. Of course there are
   also helper classes, functions, and decorators that can be reused.
 * `manage.py`: the Django manage.py file to execute management commands.
 
@@ -70,7 +68,7 @@ test.
 
 ```python
 def test_something_important(data_fixture):
-    # A table, database and group have also been created because the text field depends
+    # A table, database and workspace have also been created because the text field depends
     # on them.
     field = data_fixture.create_text_field()
 ```
@@ -85,10 +83,8 @@ web frontend. This whole directory is also added to the web-frontend container.
 * `.eslintrc.js`: the configuration for the eslint linter.
 * `.prettierrc`: configuration for prettier.
 * `.stylelintrc`: configuration for stylelint which lints the scss code.
-* `Dockerfile`: the dockerfile that is used to build the image of the
-  web-frontend for running baserow on your local machine.
-* `docker/Dockerfile.dev`: the dockerfile that is used to build the development image
-  of the web-frontend.
+* `Dockerfile`:  Builds an image containing just the web-frontend service, build with
+  `--target dev` to instead get a dev ready image.
 * `intellij-idea.webpack.config.js` a webpack config file that can be used by Intellij
   iDEA. It adds the correct aliases for the editor.
 * `jest.config.js`: config file for running the tests with JEST.

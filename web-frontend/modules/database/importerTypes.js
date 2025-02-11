@@ -7,7 +7,7 @@ import TableJSONImporter from '@baserow/modules/database/components/table/TableJ
 
 export class ImporterType extends Registerable {
   /**
-   * Should return a font awesome class name related to the icon that must be displayed
+   * Should return a icon class name class name related to the icon that must be displayed
    * to the user.
    */
   getIconClass() {
@@ -31,11 +31,10 @@ export class ImporterType extends Registerable {
     return null
   }
 
-  constructor() {
-    super()
+  constructor(...args) {
+    super(...args)
     this.type = this.getType()
     this.iconClass = this.getIconClass()
-    this.name = this.getName()
 
     if (this.type === null) {
       throw new Error('The type name of an importer type must be set.')
@@ -46,22 +45,23 @@ export class ImporterType extends Registerable {
     return {
       type: this.type,
       iconClass: this.iconClass,
-      name: this.name,
+      name: this.getName(),
     }
   }
 }
 
 export class CSVImporterType extends ImporterType {
-  getType() {
-    return 'csv'
+  static getType() {
+    return 'baserow-icon-file-csv'
   }
 
   getIconClass() {
-    return 'file-csv'
+    return 'baserow-icon-file-csv'
   }
 
   getName() {
-    return 'Import a CSV file'
+    const { i18n } = this.app
+    return i18n.t('importerType.csv')
   }
 
   getFormComponent() {
@@ -70,16 +70,17 @@ export class CSVImporterType extends ImporterType {
 }
 
 export class PasteImporterType extends ImporterType {
-  getType() {
+  static getType() {
     return 'paste'
   }
 
   getIconClass() {
-    return 'paste'
+    return 'iconoir-paste-clipboard'
   }
 
   getName() {
-    return 'Paste table data'
+    const { i18n } = this.app
+    return i18n.t('importerType.paste')
   }
 
   getFormComponent() {
@@ -88,16 +89,17 @@ export class PasteImporterType extends ImporterType {
 }
 
 export class XMLImporterType extends ImporterType {
-  getType() {
+  static getType() {
     return 'xml'
   }
 
   getIconClass() {
-    return 'file-code'
+    return 'baserow-icon-file-code'
   }
 
   getName() {
-    return 'Import an XML file'
+    const { i18n } = this.app
+    return i18n.t('importerType.xml')
   }
 
   getFormComponent() {
@@ -106,16 +108,17 @@ export class XMLImporterType extends ImporterType {
 }
 
 export class JSONImporterType extends ImporterType {
-  getType() {
+  static getType() {
     return 'json'
   }
 
   getIconClass() {
-    return 'file-code'
+    return 'baserow-icon-file-code'
   }
 
   getName() {
-    return 'Import a JSON file'
+    const { i18n } = this.app
+    return i18n.t('importerType.json')
   }
 
   getFormComponent() {

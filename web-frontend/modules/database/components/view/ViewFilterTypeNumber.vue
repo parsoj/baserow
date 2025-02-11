@@ -1,31 +1,61 @@
 <template>
-  <input
+  <FormInput
     ref="input"
-    v-model="copy"
-    type="text"
-    class="input filters__value-input"
-    :class="{ 'input--error': $v.copy.$error }"
-    :disabled="readOnly"
-    @input="delayedUpdate($event.target.value)"
-    @keydown.enter="delayedUpdate($event.target.value, true)"
-  />
+    :value="focused ? copy : formattedValue"
+    :error="$v.copy.$error"
+    :disabled="disabled"
+    @blur="onBlur()"
+    @keypress="onKeyPress($event)"
+    @input="setCopyAndDelayedUpdate($event)"
+    @keydown.enter="setCopyAndDelayedUpdate($event.target.value, true)"
+    @focus="onFocus()"
+  >
+  </FormInput>
 </template>
 
 <script>
-import { decimal } from 'vuelidate/lib/validators'
-
 import filterTypeInput from '@baserow/modules/database/mixins/filterTypeInput'
+import numberField from '@baserow/modules/database/mixins/numberField'
 
 export default {
-  name: 'ViewFilterTypeText',
-  mixins: [filterTypeInput],
+  name: 'ViewFilterTypeNumber',
+  mixins: [filterTypeInput, numberField],
+  data() {
+    return {
+      // Avoid rounding decimals to ensure filter values match backend behavior.
+      roundDecimals: false,
+    }
+  },
+  watch: {
+    field: {
+      handler() {
+        if (!this.focused) {
+          this.copy = this.prepareCopy(this.filter.value)
+          this.updateFormattedValue(this.field, this.filter.value)
+        }
+      },
+    },
+  },
+  created() {
+    this.copy = this.prepareCopy(this.filter.value)
+    this.updateFormattedValue(this.field, this.copy)
+  },
   methods: {
-    focus() {
-      this.$refs.input.focus()
+    afterValueChanged() {
+      if (!this.focused) {
+        this.updateFormattedValue(this.field, this.copy)
+      }
+    },
+    setCopyAndDelayedUpdate(value, immediately = false) {
+      this.updateCopy(this.field, value)
+      const newValue = String(this.prepareValue(this.copy) ?? '')
+      if (newValue !== this.filter.value) {
+        this.delayedUpdate(newValue, immediately)
+      }
     },
   },
   validations: {
-    copy: { decimal },
+    copy: {},
   },
 }
 </script>

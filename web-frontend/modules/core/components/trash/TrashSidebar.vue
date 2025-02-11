@@ -2,42 +2,53 @@
   <div>
     <div class="modal-sidebar__head">
       <div class="modal-sidebar__head-icon-and-name">
-        <i class="modal-sidebar__head-icon-and-name-icon fas fa-trash"></i>
-        Trash
+        <i class="modal-sidebar__head-icon-and-name-icon iconoir-bin"></i>
+        {{ $t('trashSidebar.title') }}
       </div>
     </div>
-    <ul class="trash-sidebar__groups">
+    <ul class="trash-sidebar__workspaces">
       <li
-        v-for="group in groups"
-        :key="'trash-group-' + group.id"
-        class="trash-sidebar__group"
+        v-for="workspace in workspaces"
+        :key="'trash-workspace-' + workspace.id"
+        class="trash-sidebar__workspace"
         :class="{
-          'trash-sidebar__group--active': isSelectedTrashGroup(group),
-          'trash-sidebar__group--open': isSelectedTrashGroupApplication(group),
-          'trash-sidebar__group--trashed': group.trashed,
+          'trash-sidebar__workspace--active':
+            isSelectedTrashWorkspace(workspace),
+          'trash-sidebar__workspace--open':
+            isSelectedTrashWorkspaceApplication(workspace),
+          'trash-sidebar__workspace--trashed': workspace.trashed,
         }"
       >
         <a
-          class="trash-sidebar__group-link"
-          @click="emitIfNotAlreadySelectedTrashGroup(group)"
+          class="trash-sidebar__workspace-link"
+          @click="emitIfNotAlreadySelectedTrashWorkspace(workspace)"
         >
-          {{ group.name || 'Unnamed group ' + group.id }}
+          <i
+            class="trash-sidebar__workspace-link-caret-right iconoir-nav-arrow-right"
+          ></i>
+          <i
+            class="trash-sidebar__workspace-link-caret-down iconoir-nav-arrow-down"
+          ></i>
+          {{
+            workspace.name ||
+            $t('trashSidebar.unnamedWorkspace', { id: workspace.id })
+          }}
         </a>
         <ul class="trash-sidebar__applications">
           <li
-            v-for="application in group.applications"
+            v-for="application in workspace.applications"
             :key="'trash-application-' + application.id"
             class="trash-sidebar__application"
             :class="{
               'trash-sidebar__application--active': isSelectedApp(application),
               'trash-sidebar__application--trashed':
-                group.trashed || application.trashed,
+                workspace.trashed || application.trashed,
             }"
           >
             <a
               class="trash-sidebar__application-link"
               @click="
-                emitIfNotAlreadySelectedTrashApplication(group, application)
+                emitIfNotAlreadySelectedTrashApplication(workspace, application)
               "
               >{{
                 application.name || 'Unnamed application ' + application.id
@@ -54,11 +65,11 @@
 export default {
   name: 'TrashSidebar',
   props: {
-    groups: {
+    workspaces: {
       type: Array,
       required: true,
     },
-    selectedTrashGroup: {
+    selectedTrashWorkspace: {
       type: Object,
       required: false,
       default: null,
@@ -70,14 +81,14 @@ export default {
     },
   },
   methods: {
-    isSelectedTrashGroup(group) {
+    isSelectedTrashWorkspace(workspace) {
       return (
-        group.id === this.selectedTrashGroup.id &&
+        workspace.id === this.selectedTrashWorkspace.id &&
         this.selectedTrashApplication === null
       )
     },
-    isSelectedTrashGroupApplication(group) {
-      return group.applications.some((application) =>
+    isSelectedTrashWorkspaceApplication(workspace) {
+      return workspace.applications.some((application) =>
         this.isSelectedApp(application)
       )
     },
@@ -87,14 +98,14 @@ export default {
         app.id === this.selectedTrashApplication.id
       )
     },
-    emitIfNotAlreadySelectedTrashGroup(group) {
-      if (!this.isSelectedTrashGroup(group)) {
-        this.emitSelected({ group })
+    emitIfNotAlreadySelectedTrashWorkspace(workspace) {
+      if (!this.isSelectedTrashWorkspace(workspace)) {
+        this.emitSelected({ workspace })
       }
     },
-    emitIfNotAlreadySelectedTrashApplication(group, application) {
+    emitIfNotAlreadySelectedTrashApplication(workspace, application) {
       if (!this.isSelectedApp(application)) {
-        this.emitSelected({ group, application })
+        this.emitSelected({ workspace, application })
       }
     },
     emitSelected(selected) {

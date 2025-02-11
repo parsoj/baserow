@@ -4,35 +4,88 @@
     :class="{
       'dropdown--floating': !showInput,
       'dropdown--disabled': disabled,
+      'dropdown--large': size === 'large',
+      'dropdown--error': error,
     }"
+    :tabindex="realTabindex"
+    @focusin="show()"
+    @focusout="focusout($event)"
   >
     <a v-if="showInput" class="dropdown__selected" @click="show()">
       <template v-if="hasValue()">
-        <i
-          v-if="selectedIcon"
-          class="dropdown__selected-icon fas"
-          :class="'fa-' + selectedIcon"
-        ></i>
-        {{ selectedName }}
+        <slot name="selectedValue">
+          <template v-if="multiple">
+            <span
+              class="dropdown__selected-text"
+              :title="selectedName.join(', ')"
+              >{{ selectedName.join(', ') }}</span
+            >
+          </template>
+          <template v-else>
+            <i
+              v-if="selectedIcon"
+              class="dropdown__selected-icon"
+              :class="selectedIcon"
+            />
+            <img
+              v-if="selectedImage"
+              class="dropdown__selected-image"
+              :src="selectedImage"
+            />
+            <span class="dropdown__selected-text" :title="selectedName">{{
+              selectedName
+            }}</span>
+          </template>
+        </slot>
       </template>
-      <template v-else>Make a choice</template>
-      <i class="dropdown__toggle-icon fas fa-caret-down"></i>
+      <template v-else>
+        <slot name="defaultValue">
+          <span class="dropdown__selected-placeholder">{{
+            placeholder ? placeholder : $t('action.makeChoice')
+          }}</span>
+        </slot>
+      </template>
+      <i class="dropdown__toggle-icon iconoir-nav-arrow-down"></i>
     </a>
-    <div class="dropdown__items" :class="{ hidden: !open }">
+    <div
+      ref="itemsContainer"
+      class="dropdown__items"
+      :class="{
+        hidden: !open,
+        'dropdown__items--fixed': fixedItemsImmutable,
+        'dropdown__items--max-width': maxWidth,
+      }"
+    >
       <div v-if="showSearch" class="select__search">
-        <i class="select__search-icon fas fa-search"></i>
+        <i class="select__search-icon iconoir-search"></i>
         <input
           ref="search"
           v-model="query"
           type="text"
           class="select__search-input"
-          :placeholder="searchText"
+          :placeholder="searchText === null ? $t('action.search') : searchText"
+          tabindex="0"
           @keyup="search(query)"
         />
       </div>
-      <ul ref="items" v-auto-overflow-scroll class="select__items">
+      <ul
+        v-show="hasDropdownItem"
+        ref="items"
+        v-auto-overflow-scroll
+        class="select__items"
+        :class="{ 'select__items--no-max-height': fixedItemsImmutable }"
+        tabindex="-1"
+      >
         <slot></slot>
       </ul>
+      <div v-if="!hasDropdownItem" class="select__items--empty">
+        <slot name="emptyState">
+          {{ $t('dropdown.empty') }}
+        </slot>
+      </div>
+      <div v-if="showFooter" class="select__footer">
+        <slot name="footer"></slot>
+      </div>
     </div>
   </div>
 </template>

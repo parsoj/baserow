@@ -8,31 +8,38 @@
       }"
       @click="$refs.context.toggle($refs.contextLink, 'bottom', 'left', 4)"
     >
-      <i class="header__filter-icon fas fa-filter"></i>
-      <span class="header__filter-name">{{ filterTitle }}</span>
+      <i class="header__filter-icon iconoir-filter"></i>
+      <span class="header__filter-name">{{
+        $tc('viewFilter.filter', view.filters.length, {
+          count: view.filters.length,
+        })
+      }}</span>
     </a>
-    <ViewFilterContext
+    <Context
       ref="context"
-      :view="view"
-      :fields="fields"
-      :primary="primary"
-      :read-only="readOnly"
-      @changed="$emit('changed')"
-    ></ViewFilterContext>
+      class="filters"
+      :class="{ 'context--loading-overlay': view._.loading }"
+      max-height-if-outside-viewport
+    >
+      <ViewFilterForm
+        :fields="fields"
+        :view="view"
+        :is-public-view="isPublicView"
+        :read-only="readOnly"
+        :disable-filter="disableFilter"
+        @changed="$emit('changed')"
+      />
+    </Context>
   </div>
 </template>
 
 <script>
-import ViewFilterContext from '@baserow/modules/database/components/view/ViewFilterContext'
+import ViewFilterForm from '@baserow/modules/database/components/view/ViewFilterForm'
 
 export default {
   name: 'ViewFilter',
-  components: { ViewFilterContext },
+  components: { ViewFilterForm },
   props: {
-    primary: {
-      type: Object,
-      required: true,
-    },
     fields: {
       type: Array,
       required: true,
@@ -41,21 +48,18 @@ export default {
       type: Object,
       required: true,
     },
+    isPublicView: {
+      type: Boolean,
+      required: false,
+      default: false,
+    },
     readOnly: {
       type: Boolean,
       required: true,
     },
-  },
-  computed: {
-    filterTitle() {
-      const numberOfFilters = this.view.filters.length
-      if (numberOfFilters === 0) {
-        return 'Filter'
-      } else if (numberOfFilters === 1) {
-        return `${numberOfFilters} Filter`
-      } else {
-        return `${numberOfFilters} Filters`
-      }
+    disableFilter: {
+      type: Boolean,
+      required: true,
     },
   },
   beforeMount() {

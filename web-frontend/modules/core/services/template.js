@@ -3,8 +3,13 @@ export default (client) => {
     fetchAll() {
       return client.get('/templates/')
     },
-    install(groupId, templateId) {
-      return client.get(`/templates/install/${groupId}/${templateId}/`)
+    install(workspaceId, templateId) {
+      return client.post(`/templates/install/${workspaceId}/${templateId}/`)
+    },
+    asyncInstall(workspaceId, templateId) {
+      return client.post(
+        `/templates/install/${workspaceId}/${templateId}/async/`
+      )
     },
   }
 }

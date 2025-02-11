@@ -3,8 +3,11 @@
     <PaginatedDropdown
       :fetch-page="fetchPage"
       :value="dropdownValue"
-      :class="{ 'dropdown--error': touched && !valid }"
+      :initial-display-name="initialDisplayName"
+      :error="touched && !valid"
       :fetch-on-open="lazyLoad"
+      :disabled="readOnly"
+      :include-display-name-in-selected-event="true"
       @input="updateValue($event)"
       @hide="touch()"
     ></PaginatedDropdown>
@@ -17,7 +20,7 @@
 <script>
 import PaginatedDropdown from '@baserow/modules/core/components/PaginatedDropdown'
 import rowEditField from '@baserow/modules/database/mixins/rowEditField'
-import FormService from '@baserow/modules/database/services/view/form'
+import ViewService from '@baserow/modules/database/services/view'
 
 export default {
   name: 'FormViewFieldLinkRow',
@@ -43,20 +46,31 @@ export default {
   },
   computed: {
     dropdownValue() {
-      return this.value.length === 0 ? null : this.value[0].id
+      return this.value.length === 0 ? false : this.value[0].id
+    },
+    initialDisplayName() {
+      return this.value.length === 0 ? '' : this.value[0].value
     },
   },
   methods: {
     fetchPage(page, search) {
-      return FormService(this.$client).linkRowFieldLookup(
+      const publicAuthToken =
+        this.$store.getters['page/view/public/getAuthToken']
+      return ViewService(this.$client).linkRowFieldLookup(
         this.slug,
         this.field.id,
         page,
-        search
+        search,
+        100,
+        publicAuthToken
       )
     },
-    updateValue(value) {
-      this.$emit('update', value === null ? [] : [{ id: value }], this.value)
+    updateValue({ value, displayName }) {
+      const selection =
+        value === null || value === ''
+          ? []
+          : [{ id: value, value: displayName }]
+      this.$emit('update', selection, this.value)
     },
   },
 }

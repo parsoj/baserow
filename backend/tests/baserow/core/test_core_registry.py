@@ -1,23 +1,22 @@
-import pytest
-
 from django.core.exceptions import ImproperlyConfigured
 
-from rest_framework.serializers import IntegerField, ModelSerializer
+import pytest
 from rest_framework.exceptions import APIException
+from rest_framework.serializers import IntegerField, ModelSerializer
 
 from baserow.contrib.database.models import Database
-from baserow.core.registry import (
-    Instance,
-    ModelInstanceMixin,
-    Registry,
-    ModelRegistryMixin,
-    CustomFieldsInstanceMixin,
-    CustomFieldsRegistryMixin,
-    MapAPIExceptionsInstanceMixin,
-)
 from baserow.core.exceptions import (
     InstanceTypeAlreadyRegistered,
     InstanceTypeDoesNotExist,
+)
+from baserow.core.registry import (
+    CustomFieldsInstanceMixin,
+    CustomFieldsRegistryMixin,
+    Instance,
+    MapAPIExceptionsInstanceMixin,
+    ModelInstanceMixin,
+    ModelRegistryMixin,
+    Registry,
 )
 
 
@@ -39,6 +38,24 @@ class TemporaryApplication2(ModelInstanceMixin, Instance):
     model_class = FakeModel2
 
 
+class BaseFakeModel(object):
+    pass
+
+
+class SubClassOfBaseFakeModel(BaseFakeModel):
+    pass
+
+
+class BaseFakeModelApplication(ModelInstanceMixin, Instance):
+    type = "temporary_1"
+    model_class = BaseFakeModel
+
+
+class SubClassOfBaseFakeModelApplication(ModelInstanceMixin, Instance):
+    type = "temporary_2"
+    model_class = SubClassOfBaseFakeModel
+
+
 class TemporaryRegistry(ModelRegistryMixin, Registry):
     name = "temporary"
 
@@ -57,6 +74,8 @@ class TemporaryGroupInstanceType(
     allowed_fields = ["name"]
     serializer_field_names = ["name"]
     serializer_field_overrides = {"name": IntegerField()}
+    request_serializer_field_names = ["order"]
+    request_serializer_field_overrides = {"order": IntegerField()}
 
 
 class TemporarySerializer(ModelSerializer):
@@ -118,6 +137,17 @@ def test_registry_get():
     assert registry.get_types() == ["temporary_1"]
 
 
+def test_registry_get_by_model_returns_the_most_specific_value():
+    base_app = BaseFakeModelApplication()
+    subtype_of_base_app = SubClassOfBaseFakeModelApplication()
+    registry = TemporaryRegistry()
+    registry.register(base_app)
+    registry.register(subtype_of_base_app)
+
+    assert registry.get_by_model(BaseFakeModel()) == base_app
+    assert registry.get_by_model(SubClassOfBaseFakeModel()) == subtype_of_base_app
+
+
 def test_api_exceptions_api_mixins():
     class FakeInstance(MapAPIExceptionsInstanceMixin, Instance):
         type = "fake_instance"
@@ -148,6 +178,11 @@ def test_get_serializer(data_fixture):
     assert serializer.__class__.__name__ == "DatabaseSerializer"
     assert "id" not in serializer.data
     assert serializer.data["name"] == 1
+    assert "order" not in serializer.data
 
     serializer = registry.get_serializer(database, base_class=TemporarySerializer)
     assert "id" in serializer.data
+    assert "order" not in serializer.data
+
+    serializer = registry.get_serializer(database, request=True)
+    assert "order" in serializer.data

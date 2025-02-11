@@ -2,6 +2,7 @@ import pytest
 
 from baserow.contrib.database.fields.handler import FieldHandler
 from baserow.contrib.database.fields.registries import field_type_registry
+from baserow.contrib.database.rows.handler import RowHandler
 
 
 @pytest.mark.django_db
@@ -21,6 +22,8 @@ def test_alter_boolean_field_column_type(data_fixture):
         "yes": True,
         "on": True,
         "YES": True,
+        "checked": True,
+        "Checked": True,
         "": False,
         "f": False,
         "n": False,
@@ -32,7 +35,7 @@ def test_alter_boolean_field_column_type(data_fixture):
     for value in mapping.keys():
         model.objects.create(**{f"field_{field.id}": value})
 
-    # Change the field type to a number and test if the values have been changed.
+    # Change the field type to a boolean and test if the values have been changed.
     field = handler.update_field(user=user, field=field, new_type_name="boolean")
 
     model = table.get_model()
@@ -69,6 +72,7 @@ def test_get_set_export_serialized_value_boolean_field(data_fixture):
             row_1, boolean_field_name, {}, None, None
         ),
         {},
+        {},
         None,
         None,
     )
@@ -79,6 +83,7 @@ def test_get_set_export_serialized_value_boolean_field(data_fixture):
             row_2, boolean_field_name, {}, None, None
         ),
         {},
+        {},
         None,
         None,
     )
@@ -88,6 +93,7 @@ def test_get_set_export_serialized_value_boolean_field(data_fixture):
         boolean_field_type.get_export_serialized_value(
             row_3, boolean_field_name, {}, None, None
         ),
+        {},
         {},
         None,
         None,
@@ -104,3 +110,40 @@ def test_get_set_export_serialized_value_boolean_field(data_fixture):
     assert old_row_1_value == getattr(row_1, boolean_field_name)
     assert old_row_2_value == getattr(row_2, boolean_field_name)
     assert old_row_3_value == getattr(row_3, boolean_field_name)
+
+
+@pytest.mark.django_db
+def test_boolean_field_adjacent_row(data_fixture):
+    user = data_fixture.create_user()
+    table = data_fixture.create_database_table(name="Car", user=user)
+    grid_view = data_fixture.create_grid_view(user=user, table=table, name="Test")
+    boolean_field = data_fixture.create_boolean_field(table=table)
+
+    data_fixture.create_view_sort(view=grid_view, field=boolean_field, order="DESC")
+
+    table_model = table.get_model()
+    handler = RowHandler()
+    [row_a, row_b, row_c] = handler.create_rows(
+        user=user,
+        table=table,
+        rows_values=[
+            {
+                f"field_{boolean_field.id}": False,
+            },
+            {
+                f"field_{boolean_field.id}": True,
+            },
+            {
+                f"field_{boolean_field.id}": True,
+            },
+        ],
+        model=table_model,
+    )
+
+    previous_row = handler.get_adjacent_row(
+        table_model, row_c.id, previous=True, view=grid_view
+    )
+    next_row = handler.get_adjacent_row(table_model, row_c.id, view=grid_view)
+
+    assert previous_row.id == row_b.id
+    assert next_row.id == row_a.id

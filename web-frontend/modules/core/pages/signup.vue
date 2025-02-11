@@ -1,59 +1,164 @@
 <template>
-  <div>
-    <h1 class="box__title">Sign up</h1>
-    <template v-if="!settings.allow_new_signups">
-      <div class="alert alert--simple alert--error alert--has-icon">
-        <div class="alert__icon">
-          <i class="fas fa-exclamation"></i>
-        </div>
-        <div class="alert__title">Sign up is disabled</div>
-        <p class="alert__content">
-          It's not possible to create an account because it has been disabled.
-        </p>
+  <div class="auth__wrapper">
+    <EmailNotVerified v-if="displayEmailNotVerified" :email="emailToVerify">
+    </EmailNotVerified>
+    <template v-if="!displayEmailNotVerified">
+      <div class="auth__logo">
+        <nuxt-link :to="{ name: 'index' }">
+          <Logo />
+        </nuxt-link>
       </div>
-      <nuxt-link
-        :to="{ name: 'login' }"
-        class="button button--large button--primary"
-      >
-        <i class="fas fa-arrow-left"></i>
-        Back to login
-      </nuxt-link>
-    </template>
-    <AuthRegister v-else :invitation="invitation" @success="success">
-      <ul class="action__links">
-        <li>
+
+      <h1 class="auth__head-title">{{ $t('signup.headTitle') }}</h1>
+      <div class="auth__head">
+        <span class="auth__head-text">
+          {{ $t('signup.loginText') }}
           <nuxt-link :to="{ name: 'login' }">
-            <i class="fas fa-arrow-left"></i>
-            Back
-          </nuxt-link>
-        </li>
-      </ul>
-    </AuthRegister>
+            {{ $t('action.login') }}
+          </nuxt-link></span
+        >
+        <LangPicker />
+      </div>
+      <template v-if="shouldShowAdminSignupPage">
+        <Alert>
+          <template #title>{{ $t('signup.requireFirstUser') }}</template>
+          <p>{{ $t('signup.requireFirstUserMessage') }}</p></Alert
+        >
+      </template>
+      <template v-if="!isSignupEnabled">
+        <Alert type="error">
+          <template #title>{{ $t('signup.disabled') }}</template>
+          <p>{{ $t('signup.disabledMessage') }}</p></Alert
+        >
+        <Button tag="nuxt-link" :to="{ name: 'login' }" full-width>
+          {{ $t('action.backToLogin') }}</Button
+        >
+      </template>
+      <template v-else>
+        <template v-if="loginButtons.length">
+          <LoginButtons
+            :invitation="invitation"
+            :original="original"
+            :hide-if-no-buttons="true"
+          />
+
+          <div class="auth__separator">
+            {{ $t('common.or') }}
+          </div>
+        </template>
+
+        <PasswordRegister
+          v-if="passwordLoginEnabled"
+          :invitation="invitation"
+          @success="next"
+        >
+        </PasswordRegister>
+
+        <LoginActions
+          v-if="!shouldShowAdminSignupPage"
+          :invitation="invitation"
+        >
+          <!-- <li class="auth__action-link">
+            <i18n path="signup.agreeTerms" tag="span">
+              <a
+                href="https://baserow.io/terms-and-conditions"
+                target="_blank"
+                @click.stop
+                >{{ $t('signup.terms') }}
+              </a>
+              {{ $t('common.and') }}
+              <a
+                href="https://baserow.io/privacy-policy"
+                target="_blank"
+                @click.stop
+                >{{ $t('signup.privacyPolicy') }}
+              </a>
+            </i18n>
+          </li> -->
+        </LoginActions>
+      </template>
+    </template>
   </div>
 </template>
 
 <script>
 import { mapGetters } from 'vuex'
-import groupInvitationToken from '@baserow/modules/core/mixins/groupInvitationToken'
-import AuthRegister from '@baserow/modules/core/components/auth/AuthRegister'
+import PasswordRegister from '@baserow/modules/core/components/auth/PasswordRegister'
+import LangPicker from '@baserow/modules/core/components/LangPicker'
+import LoginButtons from '@baserow/modules/core/components/auth/LoginButtons'
+import LoginActions from '@baserow/modules/core/components/auth/LoginActions'
+import workspaceInvitationToken from '@baserow/modules/core/mixins/workspaceInvitationToken'
+import { EMAIL_VERIFICATION_OPTIONS } from '@baserow/modules/core/enums'
+import EmailNotVerified from '@baserow/modules/core/components/auth/EmailNotVerified.vue'
 
 export default {
-  components: { AuthRegister },
-  mixins: [groupInvitationToken],
+  components: {
+    PasswordRegister,
+    LangPicker,
+    LoginButtons,
+    LoginActions,
+    EmailNotVerified,
+  },
   layout: 'login',
+  async asyncData({ app, route, store, redirect }) {
+    if (store.getters['auth/isAuthenticated']) {
+      return redirect({ name: 'dashboard' })
+    }
+    await store.dispatch('authProvider/fetchLoginOptions')
+    return await workspaceInvitationToken.asyncData({ route, app })
+  },
+  data() {
+    return {
+      displayEmailNotVerified: false,
+      emailToVerify: null,
+    }
+  },
   head() {
     return {
-      title: 'Create new account',
+      title: this.$t('signup.headTitle'),
     }
   },
   computed: {
+    isSignupEnabled() {
+      return (
+        this.settings.allow_new_signups ||
+        (this.settings.allow_signups_via_workspace_invitations &&
+          this.invitation?.id)
+      )
+    },
+    shouldShowAdminSignupPage() {
+      return this.settings.show_admin_signup_page
+    },
     ...mapGetters({
       settings: 'settings/get',
+      loginActions: 'authProvider/getAllLoginActions',
+      loginButtons: 'authProvider/getAllLoginButtons',
+      passwordLoginEnabled: 'authProvider/getPasswordLoginEnabled',
     }),
+    termsofServiceURL() {
+      return this.$nuxt.$router.resolve({
+        name: 'terms',
+      }).href
+    },
   },
   methods: {
-    success() {
-      this.$nuxt.$router.push({ name: 'dashboard' })
+    next(params) {
+      if (params?.email) {
+        this.emailToVerify = params.email
+      }
+
+      if (
+        this.emailToVerify &&
+        this.settings.email_verification ===
+          EMAIL_VERIFICATION_OPTIONS.ENFORCED &&
+        !this.$route.query.workspaceInvitationToken
+      ) {
+        this.displayEmailNotVerified = true
+      } else {
+        this.$nuxt.$router.push({ name: 'dashboard' }, () => {
+          this.$store.dispatch('settings/hideAdminSignupPage')
+        })
+      }
     },
   },
 }

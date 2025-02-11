@@ -1,34 +1,43 @@
 <template>
-  <div>
-    <h1 class="box__title">REST API</h1>
+  <div class="auth__wrapper">
+    <h1 class="box__title">{{ $t('apiDocsComponent.title') }}</h1>
     <template v-if="isAuthenticated">
-      <p>
-        After you have created your database schema and API key in the
-        <a @click.prevent="$refs.settingsModal.show('tokens')">settings</a>,
-        your Baserow database provides his own REST API endpoints to create,
-        read, update and delete rows.
-      </p>
+      <i18n path="apiDocsComponent.intro" tag="p">
+        <template #settingsLink>
+          <a @click.prevent="$refs.settingsModal.show('tokens')">{{
+            $t('apiDocsComponent.settings')
+          }}</a
+          >,
+        </template>
+      </i18n>
       <div class="select-application__title">
-        For which database do you want to see the documentation?
+        {{ $t('apiDocsComponent.selectApplicationTitle') }}
       </div>
-      <APIDocsSelectDatabase></APIDocsSelectDatabase>
+      <APIDocsSelectDatabase />
+      <nuxt-link :to="{ name: 'dashboard' }" class="select-application__back">
+        <i class="iconoir-arrow-left"></i>
+        {{ $t('apiDocsComponent.back') }}
+      </nuxt-link>
       <SettingsModal ref="settingsModal"></SettingsModal>
     </template>
     <template v-else>
-      <p>
-        After you have created your database schema and API key in the settings,
-        your Baserow database provides his own REST API endpoints to create,
-        read, update and delete rows.
-      </p>
-      <nuxt-link
+      <i18n path="apiDocsComponent.intro" tag="p">
+        <template #settingsLink>{{ $t('apiDocsComponent.settings') }},</template
+        >,
+      </i18n>
+
+      <Button
+        tag="nuxt-link"
         :to="{
           name: 'login',
           query: {
             original: $route.path,
           },
         }"
-        class="button button--ghost button--large"
-        >Sign in to get started</nuxt-link
+        type="secondary"
+        size="large"
+      >
+        {{ $t('apiDocsComponent.signIn') }}</Button
       >
     </template>
   </div>
@@ -44,7 +53,7 @@ export default {
   name: 'APIDocs',
   components: { SettingsModal, APIDocsSelectDatabase },
   layout: 'login',
-  middleware: ['groupsAndApplications'],
+  middleware: ['workspacesAndApplications'],
   head() {
     return {
       title: 'REST API documentation',

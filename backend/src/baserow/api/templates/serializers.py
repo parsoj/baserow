@@ -1,11 +1,14 @@
-from rest_framework import serializers
-
-from drf_spectacular.utils import extend_schema_field
-from drf_spectacular.types import OpenApiTypes
-
 from django.conf import settings
 
-from baserow.core.models import TemplateCategory, Template
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import extend_schema_field
+from rest_framework import serializers
+
+from baserow.core.models import Template, TemplateCategory
+
+
+class ListRequestQueryParamSerializer(serializers.Serializer):
+    search = serializers.CharField(required=False)
 
 
 class TemplateSerializer(serializers.ModelSerializer):
@@ -17,7 +20,15 @@ class TemplateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Template
-        fields = ("id", "name", "icon", "keywords", "group_id", "is_default")
+        fields = (
+            "id",
+            "name",
+            "slug",
+            "icon",
+            "keywords",
+            "workspace_id",
+            "is_default",
+        )
 
     @extend_schema_field(OpenApiTypes.STR)
     def get_is_default(self, instance):

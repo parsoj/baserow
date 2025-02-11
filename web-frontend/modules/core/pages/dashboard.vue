@@ -1,168 +1,93 @@
 <template>
-  <div class="layout__col-2-scroll">
-    <div
-      class="alert alert--simple alert--warning alert--has-icon dashboard__alert"
-    >
-      <div class="alert__icon">
-        <i class="fas fa-exclamation"></i>
-      </div>
-      <div class="alert__title">We need your help!</div>
-      <p class="alert__content">
-        If you find Baserow useful then sponsoring, starring or sharing us is
-        greatly appreciated:
-      </p>
-      <a
-        href="https://github.com/sponsors/bram2w"
-        target="_blank"
-        rel="noopener noreferrer"
-        class="button button--primary dashboard__alert-button"
-      >
-        Become a GitHub sponsor
-        <i class="fa fa-heart"></i>
-      </a>
-      <a
-        href="https://gitlab.com/bramw/baserow"
-        target="_blank"
-        rel="noopener noreferrer"
-        class="button button--primary dashboard__alert-button"
-      >
-        Star us on Gitlab
-        <i class="fab fa-gitlab"></i>
-      </a>
-      <a
-        v-tooltip="'Tweet about Baserow'"
-        :href="
-          'https://twitter.com/intent/tweet?url=https://baserow.io' +
-          '&hashtags=opensource,nocode,database,baserow&text=' +
-          encodeURI(
-            'Check out @baserow an open source no-code database tool and Airtable alternative!'
-          )
-        "
-        target="_blank"
-        rel="noopener noreferrer"
-        class="button button--primary dashboard__alert-button"
-      >
-        <i class="fab fa-twitter"></i>
-      </a>
-      <a
-        v-tooltip="'Share on Reddit'"
-        :href="
-          'https://www.reddit.com/submit?url=https://baserow.io&title=' +
-          encodeURI('Baserow - An open source no-code database')
-        "
-        target="_blank"
-        rel="noopener noreferrer"
-        class="button button--primary dashboard__alert-button"
-      >
-        <i class="fab fa-reddit"></i>
-      </a>
-      <a
-        v-tooltip="'Share on Facebook'"
-        href="https://www.facebook.com/sharer/sharer.php?u=https://baserow.io"
-        target="_blank"
-        rel="noopener noreferrer"
-        class="button button--primary dashboard__alert-button"
-      >
-        <i class="fab fa-facebook"></i>
-      </a>
-      <a
-        v-tooltip="'Share on LinkedIn'"
-        href="https://www.linkedin.com/sharing/share-offsite/?url=https://baserow.io"
-        target="_blank"
-        rel="noopener noreferrer"
-        class="button button--primary dashboard__alert-button"
-      >
-        <i class="fab fa-linkedin"></i>
-      </a>
-    </div>
-    <GroupInvitation
-      v-for="invitation in groupInvitations"
-      :key="'invitation-' + invitation.id"
-      :invitation="invitation"
-      @remove="removeInvitation($event)"
-    ></GroupInvitation>
-    <div v-if="groups.length === 0" class="placeholder">
-      <div class="placeholder__icon">
-        <i class="fas fa-layer-group"></i>
-      </div>
-      <h1 class="placeholder__title">No groups found</h1>
-      <p class="placeholder__content">
-        You aren’t a member of any group. Applications like databases belong to
-        a group, so in order to create them you need to create a group.
-      </p>
-      <div class="placeholder__action">
-        <a class="button button--large" @click="$refs.createGroupModal.show()">
-          <i class="fas fa-plus"></i>
-          Create group
-        </a>
+  <div class="dashboard__container">
+    <div class="dashboard__main">
+      <DashboardVerifyEmail
+        class="margin-top-0 margin-bottom-0"
+      ></DashboardVerifyEmail>
+      <WorkspaceInvitation
+        v-for="invitation in workspaceInvitations"
+        :key="'invitation-' + invitation.id"
+        :invitation="invitation"
+        class="margin-top-0 margin-bottom-0"
+      ></WorkspaceInvitation>
+      <div class="dashboard__wrapper">
+        <div class="dashboard__no-application">
+          <img
+            src="@baserow/modules/core/assets/images/empty_workspace_illustration.png"
+            srcset="
+              @baserow/modules/core/assets/images/empty_workspace_illustration@2x.png 2x
+            "
+          />
+          <h4>{{ $t('dashboard.noWorkspace') }}</h4>
+          <p v-if="$hasPermission('create_workspace')">
+            {{ $t('dashboard.noWorkspaceDescription') }}
+          </p>
+          <span
+            v-if="$hasPermission('create_workspace')"
+            ref="createApplicationContextLink2"
+          >
+            <Button icon="iconoir-plus" tag="a" @click="$refs.modal.show()">{{
+              $t('dashboard.addNew')
+            }}</Button>
+          </span>
+        </div>
       </div>
     </div>
-    <div v-if="groups.length > 0" class="dashboard">
-      <DashboardGroup
-        v-for="group in sortedGroups"
-        :key="group.id"
-        :group="group"
-      ></DashboardGroup>
-      <div>
-        <a class="button button--large" @click="$refs.createGroupModal.show()">
-          <i class="fas fa-plus"></i>
-          Create group
-        </a>
-      </div>
-    </div>
-    <CreateGroupModal ref="createGroupModal"></CreateGroupModal>
+    <CreateWorkspaceModal ref="modal"></CreateWorkspaceModal>
   </div>
 </template>
 
 <script>
-import { mapState, mapGetters } from 'vuex'
+import { mapGetters } from 'vuex'
 
-import CreateGroupModal from '@baserow/modules/core/components/group/CreateGroupModal'
-import DashboardGroup from '@baserow/modules/core/components/group/DashboardGroup'
-import GroupInvitation from '@baserow/modules/core/components/group/GroupInvitation'
-import AuthService from '@baserow/modules/core/services/auth'
+import CreateWorkspaceModal from '@baserow/modules/core/components/workspace/CreateWorkspaceModal'
+import DashboardVerifyEmail from '@baserow/modules/core/components/dashboard/DashboardVerifyEmail'
+import WorkspaceInvitation from '@baserow/modules/core/components/workspace/WorkspaceInvitation'
 
+/**
+ * The main purpose of the dashboard is to either redirect the user to the correct
+ * workspace homepage or show a message if the user doesn't have a workspace.
+ */
 export default {
-  components: { CreateGroupModal, DashboardGroup, GroupInvitation },
-  layout: 'app',
-  /**
-   * Fetches the data that must be shown on the dashboard, this could for example be
-   * pending group invitations.
-   */
-  async asyncData({ error, app }) {
-    try {
-      const { data } = await AuthService(app.$client).dashboard()
-      return { groupInvitations: data.group_invitations }
-    } catch (e) {
-      return error({ statusCode: 400, message: 'Error loading dashboard.' })
-    }
+  components: {
+    CreateWorkspaceModal,
+    DashboardVerifyEmail,
+    WorkspaceInvitation,
   },
-  head() {
-    return {
-      title: 'Dashboard',
+  layout: 'app',
+  async asyncData({ query, store, redirect }) {
+    const selectedWorkspace = store.getters['workspace/getSelected']
+    const allWorkspaces = store.getters['workspace/getAll']
+
+    // If there is a selected workspace, we'll redirect the user to that homepage.
+    if (Object.keys(selectedWorkspace).length > 0) {
+      return redirect({
+        name: 'workspace',
+        params: {
+          workspaceId: selectedWorkspace.id,
+        },
+        query,
+      })
     }
+
+    // If there isn't a selected workspace, but one does exist, we'll select the first
+    // one.
+    if (allWorkspaces.length > 0) {
+      return redirect({
+        name: 'workspace',
+        params: {
+          workspaceId: allWorkspaces[0].id,
+        },
+        query,
+      })
+    }
+
+    await store.dispatch('auth/fetchWorkspaceInvitations')
   },
   computed: {
     ...mapGetters({
-      sortedGroups: 'group/getAllSorted',
+      workspaceInvitations: 'auth/getWorkspaceInvitations',
     }),
-    ...mapState({
-      user: (state) => state.auth.user,
-      groups: (state) => state.group.items,
-      applications: (state) => state.application.items,
-    }),
-  },
-  methods: {
-    /**
-     * When a group invation has been rejected or accepted, it can be removed from the
-     * list because in both situations the invitation itself is deleted.
-     */
-    removeInvitation(invitation) {
-      const index = this.groupInvitations.findIndex(
-        (i) => i.id === invitation.id
-      )
-      this.groupInvitations.splice(index, 1)
-    },
   },
 }
 </script>

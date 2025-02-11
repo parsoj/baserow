@@ -5,10 +5,7 @@
     :class="{ editing: editing }"
     @contextmenu="stopContextIfEditing($event)"
   >
-    <div
-      class="grid-field-date"
-      :class="{ 'grid-field-date--has-time': field.date_include_time }"
-    >
+    <div class="grid-field-date">
       <div v-show="!editing" ref="dateDisplay" class="grid-field-date__date">
         {{ date }}
       </div>
@@ -41,7 +38,8 @@
               :inline="true"
               :monday-first="true"
               :use-utc="true"
-              :value="copy"
+              :value="pickerDate"
+              :language="datePickerLang[$i18n.locale]"
               class="datepicker"
               @input="chooseDate(field, $event)"
               @selected="preventNextUnselect = true"
@@ -69,6 +67,9 @@
           ></TimeSelectContext>
         </template>
       </template>
+      <div v-if="field.date_show_tzinfo" class="grid-field-date__tzinfo">
+        {{ getCellTimezoneAbbr(field, value, { force: editing }) }}
+      </div>
     </div>
   </div>
 </template>
@@ -79,6 +80,7 @@ import { isElement } from '@baserow/modules/core/utils/dom'
 import gridField from '@baserow/modules/database/mixins/gridField'
 import gridFieldInput from '@baserow/modules/database/mixins/gridFieldInput'
 import dateField from '@baserow/modules/database/mixins/dateField'
+import { en, fr } from 'vuejs-datepicker/dist/locale'
 
 export default {
   components: { TimeSelectContext },
@@ -86,6 +88,10 @@ export default {
   data() {
     return {
       preventNextUnselect: false,
+      datePickerLang: {
+        en,
+        fr,
+      },
     }
   },
   methods: {
@@ -145,8 +151,8 @@ export default {
         return original
       }
 
-      const previous = event.keyCode === 9 && event.shiftKey
-      const next = event.keyCode === 9 && !event.shiftKey
+      const previous = event.key === 'Tab' && event.shiftKey
+      const next = event.key === 'Tab' && !event.shiftKey
       return (
         original &&
         !(next && this.$refs.date === document.activeElement) &&

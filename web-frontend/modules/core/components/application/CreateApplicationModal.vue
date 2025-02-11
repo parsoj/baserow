@@ -1,25 +1,18 @@
 <template>
-  <Modal>
+  <Modal @show="loading = false">
     <h2 class="box__title">
-      Create new {{ applicationType.name | lowercase }}
+      {{ $t('action.createNew') }} {{ applicationType.getName() | lowercase }}
     </h2>
     <Error :error="error"></Error>
     <component
       :is="applicationType.getApplicationFormComponent()"
       ref="applicationForm"
+      :default-name="getDefaultName()"
+      :loading="loading"
+      :workspace="workspace"
       @submitted="submitted"
+      @hidden="hide()"
     >
-      <div class="actions">
-        <div class="align-right">
-          <button
-            class="button button--large"
-            :class="{ 'button--loading': loading }"
-            :disabled="loading"
-          >
-            Add {{ applicationType.name | lowercase }}
-          </button>
-        </div>
-      </div>
     </component>
   </Modal>
 </template>
@@ -27,6 +20,7 @@
 <script>
 import modal from '@baserow/modules/core/mixins/modal'
 import error from '@baserow/modules/core/mixins/error'
+import { getNextAvailableNameInSequence } from '@baserow/modules/core/utils/string'
 
 export default {
   name: 'CreateApplicationModal',
@@ -36,7 +30,7 @@ export default {
       type: Object,
       required: true,
     },
-    group: {
+    workspace: {
       type: Object,
       required: true,
     },
@@ -47,22 +41,34 @@ export default {
     }
   },
   methods: {
+    getDefaultName() {
+      const excludeNames = this.$store.getters['application/getAllOfWorkspace'](
+        this.workspace
+      ).map((application) => application.name)
+      const baseName = this.applicationType.getDefaultName()
+      return getNextAvailableNameInSequence(baseName, excludeNames)
+    },
     async submitted(values) {
       this.loading = true
       this.hideError()
 
       try {
-        await this.$store.dispatch('application/create', {
+        const application = await this.$store.dispatch('application/create', {
           type: this.applicationType.type,
-          group: this.group,
+          workspace: this.workspace,
           values,
         })
-        this.loading = false
-        this.$emit('created')
+        this.$emit('created', application)
+        // select the application just created in the sidebar and open it
+        await this.$store.dispatch('application/selectById', application.id)
+        await this.$registry
+          .get('application', application.type)
+          .select(application, this)
         this.hide()
       } catch (error) {
-        this.loading = false
         this.handleError(error, 'application')
+      } finally {
+        this.loading = false
       }
     },
   },

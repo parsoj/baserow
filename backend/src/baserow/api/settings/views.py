@@ -1,15 +1,15 @@
 from django.db import transaction
 
 from drf_spectacular.utils import extend_schema
-
-from rest_framework.views import APIView
-from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAdminUser
+from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from baserow.api.decorators import validate_body
+from baserow.api.settings.registries import settings_data_registry
 from baserow.core.handler import CoreHandler
 
-from .serializers import SettingsSerializer
+from .serializers import InstanceIdSerializer, SettingsSerializer
 
 
 class SettingsView(APIView):
@@ -22,15 +22,34 @@ class SettingsView(APIView):
         responses={
             200: SettingsSerializer,
         },
-        auth=[None],
+        auth=[],
     )
     def get(self, request):
-        """
-        Responds with all the admin configured settings.
-        """
+        """Responds with all the admin configured settings."""
 
         settings = CoreHandler().get_settings()
-        return Response(SettingsSerializer(settings).data)
+        data = SettingsSerializer(settings).data
+        data.update(**settings_data_registry.get_all_settings_data(request))
+        return Response(data)
+
+
+class InstanceIdView(APIView):
+    permission_classes = (IsAdminUser,)
+
+    @extend_schema(
+        tags=["Settings"],
+        operation_id="get_instance_id",
+        description="Responds with the self hosted instance id. Only a user with "
+        "staff permissions can request it.",
+        responses={
+            200: InstanceIdSerializer,
+        },
+    )
+    def get(self, request):
+        """Responds with the instance id."""
+
+        settings = CoreHandler().get_settings()
+        return Response(InstanceIdSerializer(settings).data)
 
 
 class UpdateSettingsView(APIView):
@@ -47,7 +66,7 @@ class UpdateSettingsView(APIView):
             200: SettingsSerializer,
         },
     )
-    @validate_body(SettingsSerializer)
+    @validate_body(SettingsSerializer, partial=True)
     @transaction.atomic
     def patch(self, request, data):
         """

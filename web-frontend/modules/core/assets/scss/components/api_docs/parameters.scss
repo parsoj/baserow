@@ -1,6 +1,6 @@
 .api-docs__parameters {
   list-style: none;
-  margin: 30px 0 0 0;
+  margin: 30px 0 0;
   padding: 0;
 }
 
@@ -31,6 +31,10 @@
   margin: 0 20px 20px 0;
 }
 
+.api-docs__parameter-name--parent {
+  margin: 0 20px 0 0;
+}
+
 .api-docs__parameter-visible-name {
   color: $color-neutral-700;
   margin-left: 4px;
@@ -43,7 +47,8 @@
   padding: 4px 6px;
   background-color: $color-success-500;
   color: $white;
-  border-radius: 3px;
+
+  @include rounded($rounded);
 }
 
 .api-docs__parameter-description {
@@ -61,4 +66,8 @@
 .api-docs__parameter-content {
   margin-top: 8px;
   line-height: 140%;
+}
+
+.api-docs__parameter-content--parent {
+  margin-left: 20px;
 }

@@ -6,16 +6,17 @@ start the app with the least amount of hassle.
 
 ### Quickstart
 
-If you are familiar with git and docker-compose run these commands to launch baserow's
+If you are familiar with git and docker-compose run these commands to launch Baserow's
 dev environment locally, otherwise please start from the Installing Requirements section
 below.
 
 ```bash
-$ git clone --branch master https://gitlab.com/bramw/baserow.git
-$ cd baserow
-$ docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
-$ # OR use our ./dev.sh script which also ensures your dev containers run as your user
-$ ./dev.sh --build
+$ git clone --branch develop https://gitlab.com/baserow/baserow.git
+# Our supplied ./dev.sh script wraps docker-compose setting the correct env vars for 
+# you to get hot code reloading working well.
+$ ./dev.sh 
+# Run ./dev.sh help for further details.
+$ ./dev.sh help
 ```
 
 ## Installing requirements
@@ -25,7 +26,7 @@ so by following the instructions on https://docs.docker.com/desktop/ and
 https://docs.docker.com/compose/install/.
 
 > Docker version 19.03 is the minimum required to build Baserow. It is strongly
-> advised however that you install the latest version of Docker available: 20.10.
+> advised however that you install the latest version of Docker available.
 > Please check that your docker is up to date by running `docker -v`.
 
 You will also need git installed which you can do by following the instructions on
@@ -35,7 +36,7 @@ https://www.linode.com/docs/development/version-control/how-to-install-git-on-li
 Once you have finished installing all the required software you should be able to run
 the following commands in your terminal.
 
-```
+```bash
 $ docker -v
 Docker version 20.10.6, build 370c289
 $ docker-compose -v
@@ -60,15 +61,9 @@ First we have to clone the repository. Execute the following commands to clone t
 master branch. If you are not familiar with git clone, this will download a copy of
 Baserow's code to your computer.
 
-> Note that if you have already started the
-> [running baserow locally guide](../guides/running-baserow-locally.md) once, you might
-> need to rebuild the images for the development environment by using the command
-> `docker-compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build`
-> or just `./dev.sh build_only` because they have container name conflicts.
-
 ```
 $ cd ~/baserow
-$ git clone --branch master https://gitlab.com/bramw/baserow.git
+$ git clone --branch master https://gitlab.com/baserow/baserow.git
 Cloning into 'baserow'...
 ...
 $ cd baserow
@@ -80,14 +75,10 @@ docker-compose command using the `docker-compose.yml` file. It might take a whil
 the command to finish, this is because the images have to be built from scratch.
 
 ```
-$ docker-compose -f docker-compose.yml -f docker-compose.dev.yml up -d
-$ # Or instead you can use ./dev.sh which also ensures the dev environment runs as you 
 $ ./dev.sh 
-$ # Run ./dev.sh for more details on what it can do! 
 Building backend
 ...
 Starting db    ... done
-Starting mjml    ... done
 Starting redis    ... done
 Starting backend    ... done
 Starting web-frontend   ... done
@@ -101,7 +92,7 @@ to sign up and login to your Baserow.
 
 Baserow's backend container exposes a rest API. Find the API spec for your local version
 of Baserow at http://localhost:8000/api/redoc/ . To check that it is working correctly
-when you visit http://localhost:8000/api/groups/ in a browser you should see the error
+when you visit http://localhost:8000/api/workspaces/ in a browser you should see the error
 "Authentication credentials were not provided." as no JWT was provided.
 
 ## Attaching to the dev environment
@@ -127,9 +118,7 @@ bash history to get the original command to restart the containers main process.
 
 ## Other useful commands
 
-See the [docker how to guide](../guides/baserow-docker-how-to.md) for a larger collection of
-useful operations and commands, below is a quick example of some of the more common
-ones:
+Below is a quick example of some of the more common useful operations and commands:
 
 ```bash
 $ # View the logs 
@@ -158,8 +147,8 @@ For further reading on how to work with docker containers and django check out:
 
 ## Baserow further reading
 
-- See [introduction](../getting-started/introduction.md) for more details on Baserow's
+- See [introduction](../technical/introduction.md) for more details on Baserow's
   architecture.
-- See [baserow docker api](../reference/baserow-docker-api.md) for more detail on how
+- See [baserow docker api](../technical/baserow-docker-api.md) for more detail on how
   Baserow's docker setup can be used and configured.
 - See [dev.sh](dev_sh.md) for further detail on what dev.sh does and why

@@ -1,41 +1,49 @@
 <template>
   <form @submit.prevent="submit">
-    <div class="control">
-      <label class="control__label"> Name </label>
-      <div class="control__elements">
-        <input
-          ref="name"
-          v-model="values.name"
-          :class="{ 'input--error': $v.values.name.$error }"
-          type="text"
-          class="input input--large"
-          @blur="$v.values.name.$touch()"
-        />
-        <div v-if="$v.values.name.$error" class="error">
-          This field is required.
-        </div>
-      </div>
-    </div>
-    <div class="control">
-      <label class="control__label"> Group </label>
+    <FormGroup
+      :label="$t('apiTokenForm.nameLabel')"
+      small-label
+      required
+      :error="fieldHasErrors('name')"
+      class="margin-bottom-2"
+    >
+      <FormInput
+        ref="name"
+        v-model="values.name"
+        size="large"
+        :error="fieldHasErrors('name')"
+        @blur="$v.values.name.$touch()"
+      >
+      </FormInput>
+
+      <template #error> {{ $t('error.requiredField') }}</template>
+    </FormGroup>
+
+    <FormGroup
+      :error="fieldHasErrors('workspace')"
+      small-label
+      :label="$t('apiTokenForm.workspaceLabel')"
+      required
+      class="margin-bottom-2"
+    >
       <Dropdown
-        v-model="values.group"
+        v-model="values.workspace"
         class="col-4"
-        @hide="$v.values.group.$touch()"
+        @hide="$v.values.workspace.$touch()"
       >
         <DropdownItem
-          v-for="group in groups"
-          :key="group.id"
-          :name="group.name"
-          :value="group.id"
+          v-for="workspace in workspaces"
+          :key="workspace.id"
+          :name="workspace.name"
+          :value="workspace.id"
         ></DropdownItem>
       </Dropdown>
-      <div class="control__elements">
-        <div v-if="$v.values.group.$error" class="error">
-          This field is required.
-        </div>
-      </div>
-    </div>
+
+      <template #error>
+        {{ $t('error.requiredField') }}
+      </template>
+    </FormGroup>
+
     <slot></slot>
   </form>
 </template>
@@ -53,13 +61,13 @@ export default {
     return {
       values: {
         name: '',
-        group: '',
+        workspace: '',
       },
     }
   },
   computed: {
     ...mapState({
-      groups: (state) => state.group.items,
+      workspaces: (state) => state.workspace.items,
     }),
   },
   mounted() {
@@ -68,7 +76,7 @@ export default {
   validations: {
     values: {
       name: { required },
-      group: { required },
+      workspace: { required },
     },
   },
 }

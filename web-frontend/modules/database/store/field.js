@@ -15,7 +15,6 @@ export const state = () => ({
   types: {},
   loading: false,
   loaded: false,
-  primary: null,
   items: [],
 })
 
@@ -34,9 +33,6 @@ export const mutations = {
   },
   SET_LOADED(state, value) {
     state.loaded = value
-  },
-  SET_PRIMARY(state, item) {
-    state.primary = Object.assign(state.primary || {}, item)
   },
   ADD_ITEM(state, item) {
     state.items.push(item)
@@ -82,29 +78,33 @@ export const actions = {
 
     try {
       const { data } = await FieldService(this.$client).fetchAll(table.id)
-      data.forEach((part, index, d) => {
-        populateField(data[index], this.$registry)
-      })
-
-      const primaryIndex = data.findIndex((item) => item.primary === true)
-      const primary =
-        primaryIndex !== -1 ? data.splice(primaryIndex, 1)[0] : null
-      commit('SET_PRIMARY', primary)
-
-      commit('SET_ITEMS', data)
-      commit('SET_LOADING', false)
-      commit('SET_LOADED', true)
+      await dispatch('forceSetFields', { fields: data })
     } catch (error) {
       commit('SET_ITEMS', [])
       commit('SET_LOADING', false)
 
       throw error
     }
+    return getters.getAll
+  },
+  forceSetFields({ commit }, { fields }) {
+    fields.forEach((part, index) => {
+      populateField(fields[index], this.$registry)
+    })
+
+    commit('SET_ITEMS', fields)
+    commit('SET_LOADING', false)
+    commit('SET_LOADED', true)
+
+    return { fields }
   },
   /**
    * Creates a new field with the provided type for the given table.
    */
-  async create(context, { type, table, values }) {
+  async create(
+    context,
+    { type, table, values, forceCreate = true, undoRedoActionGroupId = null }
+  ) {
     const { dispatch } = context
 
     if (Object.prototype.hasOwnProperty.call(values, 'type')) {
@@ -120,9 +120,32 @@ export const actions = {
 
     const postData = clone(values)
     postData.type = type
+    const { data } = await FieldService(this.$client).create(
+      table.id,
+      postData,
+      undoRedoActionGroupId
+    )
+    const forceCreateCallback = async () => {
+      return await dispatch('forceCreate', {
+        table,
+        values: data,
+        relatedFields: data.related_fields,
+      })
+    }
+    const fieldType = this.$registry.get('field', type)
 
-    const { data } = await FieldService(this.$client).create(table.id, postData)
-    dispatch('forceCreate', { table, values: data })
+    const fetchNeeded =
+      fieldType.shouldFetchDataWhenAdded() ||
+      anyFieldsNeedFetch(data.related_fields, this.$registry)
+    const callback = forceCreate
+      ? await forceCreateCallback()
+      : forceCreateCallback
+    return {
+      forceCreateCallback: callback,
+      fetchNeeded,
+      newField: data,
+      undoRedoActionGroupId,
+    }
   },
   /**
    * Restores a field into the field store and notifies the selected view that the
@@ -150,8 +173,8 @@ export const actions = {
   /**
    * Forcefully create a new field without making a call to the backend.
    */
-  async forceCreate(context, { table, values }) {
-    const { commit } = context
+  async forceCreate(context, { table, values, relatedFields = [] }) {
+    const { commit, dispatch } = context
     const fieldType = this.$registry.get('field', values.type)
     const data = populateField(values, this.$registry)
     commit('ADD_ITEM', data)
@@ -160,8 +183,12 @@ export const actions = {
     // need to change things in loaded data. For example the grid field will add the
     // field to all of the rows that are in memory.
     for (const viewType of Object.values(this.$registry.getAll('view'))) {
-      await viewType.fieldCreated(context, table, data, fieldType, 'page/')
+      await viewType.afterFieldCreated(context, table, data, fieldType, 'page/')
     }
+
+    await dispatch('forceUpdateFields', {
+      fields: relatedFields,
+    })
   },
   /**
    * Updates the values of the provided field.
@@ -186,7 +213,37 @@ export const actions = {
 
     const { data } = await FieldService(this.$client).update(field.id, postData)
     const forceUpdateCallback = async () => {
-      return await dispatch('forceUpdate', { field, oldField, data })
+      return await dispatch('forceUpdate', {
+        field,
+        oldField,
+        data,
+        relatedFields: data.related_fields,
+      })
+    }
+
+    return forceUpdate ? await forceUpdateCallback() : forceUpdateCallback
+  },
+  /**
+   * Promote the provided field to primary field.
+   */
+  async changePrimary(context, { field, forceUpdate = true }) {
+    const { dispatch } = context
+
+    const newField = clone(field)
+    const oldField = clone(field)
+    newField.primary = true
+
+    const { data } = await FieldService(this.$client).changePrimary(
+      field.table_id,
+      field.id
+    )
+    const forceUpdateCallback = async () => {
+      return await dispatch('forceUpdate', {
+        field,
+        oldField,
+        data,
+        relatedFields: data.related_fields,
+      })
     }
 
     return forceUpdate ? await forceUpdateCallback() : forceUpdateCallback
@@ -194,16 +251,13 @@ export const actions = {
   /**
    * Forcefully update an existing field without making a request to the backend.
    */
-  async forceUpdate(context, { field, oldField, data }) {
+  async forceUpdate(context, { field, oldField, data, relatedFields = [] }) {
     const { commit, dispatch } = context
     const fieldType = this.$registry.get('field', data.type)
     data = populateField(data, this.$registry)
 
-    if (field.primary) {
-      commit('SET_PRIMARY', data)
-    } else {
-      commit('UPDATE_ITEM', { id: field.id, values: data })
-    }
+    commit('UPDATE_ITEM', { id: field.id, values: data })
+    commit('UPDATE_ITEM', { id: field.id, values: data })
 
     // The view might need to do some cleanup regarding the filters and sortings if the
     // type has changed.
@@ -216,7 +270,33 @@ export const actions = {
     // Call the field updated event on all the registered views because they might
     // need to change things in loaded data. For example the changed rows.
     for (const viewType of Object.values(this.$registry.getAll('view'))) {
-      await viewType.fieldUpdated(context, data, oldField, fieldType, 'page/')
+      await viewType.afterFieldUpdated(
+        context,
+        data,
+        oldField,
+        fieldType,
+        'page/'
+      )
+    }
+
+    await dispatch('forceUpdateFields', {
+      fields: relatedFields,
+    })
+  },
+  /**
+   * Forcefully updates a list of fields.
+   */
+  async forceUpdateFields({ getters, dispatch }, { fields }) {
+    for (const f of fields) {
+      const field = getters.get(f.id)
+      if (field !== undefined) {
+        const oldField = clone(field)
+        await dispatch('forceUpdate', {
+          field,
+          oldField,
+          data: f,
+        })
+      }
     }
   },
   /**
@@ -224,8 +304,11 @@ export const actions = {
    */
   async delete({ commit, dispatch }, field) {
     try {
-      await dispatch('deleteCall', field)
-      dispatch('forceDelete', field)
+      const { data } = await dispatch('deleteCall', field)
+      await dispatch('forceDelete', field)
+      await dispatch('forceUpdateFields', {
+        fields: data.related_fields,
+      })
     } catch (error) {
       // If the field to delete wasn't found we can just delete it from the
       // state.
@@ -237,10 +320,10 @@ export const actions = {
     }
   },
   /**
-   * Only makes the the delete call to the server.
+   * Only makes the delete call to the server.
    */
   async deleteCall({ commit, dispatch }, field) {
-    await FieldService(this.$client).delete(field.id)
+    return await FieldService(this.$client).delete(field.id)
   },
   /**
    * Remove the field from the items without calling the server.
@@ -257,7 +340,7 @@ export const actions = {
     // field options of that field.
     const fieldType = this.$registry.get('field', field.type)
     for (const viewType of Object.values(this.$registry.getAll('view'))) {
-      await viewType.fieldDeleted(context, field, fieldType, 'page/')
+      await viewType.afterFieldDeleted(context, field, fieldType, 'page/')
     }
   },
 }
@@ -269,18 +352,8 @@ export const getters = {
   get: (state) => (id) => {
     return state.items.find((item) => item.id === id)
   },
-  getPrimary: (state) => {
-    return state.primary
-  },
   getAll(state) {
     return state.items
-  },
-  getAllWithPrimary(state) {
-    if (state.primary !== null) {
-      return [state.primary, ...state.items]
-    } else {
-      return state.items
-    }
   },
 }
 
@@ -290,4 +363,11 @@ export default {
   getters,
   actions,
   mutations,
+}
+
+export function anyFieldsNeedFetch(fields, registry) {
+  return fields.some((f) => {
+    const relatedFieldType = registry.get('field', f.type)
+    return relatedFieldType.shouldFetchDataWhenAdded()
+  })
 }

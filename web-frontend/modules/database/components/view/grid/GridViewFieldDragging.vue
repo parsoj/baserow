@@ -1,5 +1,5 @@
 <template>
-  <div v-show="dragging">
+  <div v-show="dragging && moved">
     <div
       class="grid-view__field-dragging"
       :style="{ width: draggingWidth + 'px', left: draggingLeft + 'px' }"
@@ -27,8 +27,17 @@ export default {
       type: Array,
       required: true,
     },
+    offset: {
+      type: Number,
+      required: false,
+      default: 0,
+    },
     containerWidth: {
       type: Number,
+      required: true,
+    },
+    readOnly: {
+      type: Boolean,
       required: true,
     },
   },
@@ -36,12 +45,16 @@ export default {
     return {
       // Indicates if the user is dragging a field to another position.
       dragging: false,
+      // Indicates whether the user has moved the mouse more than the 3px threshold.
+      moved: false,
       // The field object that is being dragged.
       field: null,
       // The id of the field where the dragged field must be placed after.
       targetFieldId: null,
       // The horizontal starting position of the mouse.
-      mouseStart: 0,
+      mouseStartX: 0,
+      // The vertical starting position of the mouse.
+      mouseStartY: 0,
       // The horizontal scrollbar offset starting position.
       scrollStart: 0,
       // The width of the dragging animation, this is equal to the width of the field.
@@ -66,7 +79,7 @@ export default {
         if (this.fields[i].id === id) {
           break
         }
-        left += this.getFieldWidth(this.fields[i].id)
+        left += this.getFieldWidth(this.fields[i])
       }
       return left
     },
@@ -79,7 +92,9 @@ export default {
       this.field = field
       this.targetFieldId = field.id
       this.dragging = true
-      this.mouseStart = event.clientX
+      this.moved = false
+      this.mouseStartX = event.clientX
+      this.mouseStartY = event.clientY
       this.scrollStart = this.$parent.$el.scrollLeft
       this.draggingLeft = 0
       this.targetLeft = 0
@@ -91,13 +106,12 @@ export default {
       window.addEventListener('mouseup', this.$el.upEvent)
 
       this.$el.keydownEvent = (event) => {
-        if (event.keyCode === 27) {
+        if (event.key === 'Escape') {
           // When the user presses the escape key we want to cancel the action
           this.cancel(event)
         }
       }
       document.body.addEventListener('keydown', this.$el.keydownEvent)
-      this.move(event, false)
     },
     /**
      * The move method is called when every time the user moves the mouse while
@@ -111,21 +125,39 @@ export default {
         event = this.lastMoveEvent
       }
 
+      // Sometimes the user could accidentally drag the element one or two pixels while
+      // clicking it. Because it could be annoying that the click doesn't work because
+      // the moving state started, we check here if the user has at least dragged
+      // the element 3 pixels vertically or horizontally before starting the moved
+      // state.
+      if (!this.moved) {
+        if (
+          Math.abs(event.clientX - this.mouseStartX) > 3 ||
+          Math.abs(event.clientY - this.mouseStartY) > 3
+        ) {
+          this.moved = true
+        } else {
+          return
+        }
+      }
+
       // This is the horizontally scrollable element.
       const element = this.$parent.$el
 
-      this.draggingWidth = this.getFieldWidth(this.field.id)
+      this.draggingWidth = this.getFieldWidth(this.field)
 
       // Calculate the left position of the dragging animation. This is the transparent
       // overlay that has the same width as the field.
-      this.draggingLeft = Math.min(
-        this.getFieldLeft(this.field.id) +
-          event.clientX -
-          this.mouseStart +
-          this.$parent.$el.scrollLeft -
-          this.scrollStart,
-        this.containerWidth - this.draggingWidth
-      )
+      this.draggingLeft =
+        this.offset +
+        Math.min(
+          this.getFieldLeft(this.field.id) +
+            event.clientX -
+            this.mouseStartX +
+            this.$parent.$el.scrollLeft -
+            this.scrollStart,
+          this.containerWidth - this.draggingWidth
+        )
 
       // Calculate which after which field we want to place the field that is currently
       // being dragged. This is named the target. We also calculate what position the
@@ -134,12 +166,12 @@ export default {
         event.clientX -
         element.getBoundingClientRect().left +
         element.scrollLeft
-      let left = 0
+      let left = this.offset
       for (let i = 0; i < this.fields.length; i++) {
-        const width = this.getFieldWidth(this.fields[i].id)
+        const width = this.getFieldWidth(this.fields[i])
         const nextWidth =
           i + 1 < this.fields.length
-            ? this.getFieldWidth(this.fields[i + 1].id)
+            ? this.getFieldWidth(this.fields[i + 1])
             : width
         const leftHalf = left + Math.floor(width / 2)
         const rightHalf = left + width + Math.floor(nextWidth / 2)
@@ -147,7 +179,7 @@ export default {
           this.targetFieldId = 0
           // The value 1 makes sure it is visible instead of falling outside of the
           // view port.
-          this.targetLeft = 1
+          this.targetLeft = Math.max(this.offset, 1)
           break
         }
         if (mouseLeft > leftHalf && mouseLeft < rightHalf) {
@@ -163,7 +195,7 @@ export default {
       // might need to initiate that process.
       if (!this.autoScrolling || !startAutoScroll) {
         const relativeLeft = this.draggingLeft - element.scrollLeft
-        const relativeRight = relativeLeft + this.getFieldWidth(this.field.id)
+        const relativeRight = relativeLeft + this.getFieldWidth(this.field)
         const maxScrollLeft = element.scrollWidth - element.clientWidth
         let speed = 0
 
@@ -201,6 +233,8 @@ export default {
      */
     cancel() {
       this.dragging = false
+      this.mouseStartX = 0
+      this.mouseStartY = 0
       window.removeEventListener('mousemove', this.$el.moveEvent)
       window.removeEventListener('mouseup', this.$el.upEvent)
       document.body.addEventListener('keydown', this.$el.keydownEvent)
@@ -215,41 +249,30 @@ export default {
       event.preventDefault()
       this.cancel()
 
+      if (!this.moved) {
+        return
+      }
+
       // We don't need to do anything if the field needs to be placed after itself
       // because that wouldn't change the position.
       if (this.field.id === this.targetFieldId) {
         return
       }
 
-      const oldOrder = this.fields.map((field) => field.id)
-      // Create an array of field ids in the correct order excluding the field that
-      // needs to be repositioned because that one will be added later.
-      const newOrder = this.fields
-        .filter((field) => field.id !== this.field.id)
-        .map((field) => field.id)
-      if (this.targetFieldId === 0) {
-        // If the target field id is 0 the field needs to be moved to the beginning.
-        newOrder.unshift(this.field.id)
-      } else {
-        // Calculate after which field the field that needs to be repositioned needs to
-        // be placed.
-        const targetIndex = newOrder.findIndex(
-          (id) => id === this.targetFieldId
-        )
-        newOrder.splice(targetIndex + 1, 0, this.field.id)
+      // If targetfieldId is 0 then the field should be moved to the left of the
+      // first field, otherwise it should be moved at the right of the target field
+      const position = this.targetFieldId === 0 ? 'left' : 'right'
+      const fromField = {
+        id: this.targetFieldId === 0 ? this.fields[0].id : this.targetFieldId,
       }
-
-      // Check if the new order differs from the old order. If that is not the case we
-      // don't need to update the field options because nothing will be changed.
-      if (JSON.stringify(oldOrder) === JSON.stringify(newOrder)) {
-        return
-      }
-
       try {
         await this.$store.dispatch(
-          this.storePrefix + 'view/grid/updateFieldOptionsOrder',
+          `${this.storePrefix}view/grid/updateSingleFieldOptionOrder`,
           {
-            order: newOrder,
+            fieldToMove: this.field,
+            position,
+            fromField,
+            readOnly: this.readOnly,
           }
         )
       } catch (error) {

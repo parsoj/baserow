@@ -1,21 +1,29 @@
-from django.db import models
 from django.contrib.auth import get_user_model
+from django.db import models
+from django.db.models import Q
 
-from baserow.core.mixins import ParentGroupTrashableModelMixin
-from baserow.core.models import Group
-
+from baserow.core.mixins import (
+    HierarchicalModelMixin,
+    ParentWorkspaceTrashableModelMixin,
+)
+from baserow.core.models import Workspace
 
 User = get_user_model()
 
 
-class Token(ParentGroupTrashableModelMixin, models.Model):
+class Token(
+    HierarchicalModelMixin,
+    ParentWorkspaceTrashableModelMixin,
+    models.Model,
+):
     """
     A token can be used to authenticate a user with the row create, read, update and
     delete endpoints.
     """
 
     name = models.CharField(
-        max_length=100, help_text="The human readable name of the token for the user."
+        max_length=100,
+        help_text="The human readable name of the database token for the user.",
     )
     key = models.CharField(
         max_length=32,
@@ -28,10 +36,10 @@ class Token(ParentGroupTrashableModelMixin, models.Model):
     user = models.ForeignKey(
         User, on_delete=models.CASCADE, help_text="The user that owns the token."
     )
-    group = models.ForeignKey(
-        Group,
+    workspace = models.ForeignKey(
+        Workspace,
         on_delete=models.CASCADE,
-        help_text="Only the tables of the group can be accessed.",
+        help_text="Only the tables of the workspace can be accessed.",
     )
     handled_calls = models.PositiveIntegerField(
         default=0,
@@ -46,8 +54,25 @@ class Token(ParentGroupTrashableModelMixin, models.Model):
     class Meta:
         ordering = ("id",)
 
+    def get_parent(self):
+        return self.workspace
 
-class TokenPermission(models.Model):
+
+class TokenPermissionManager(models.Manager):
+    """
+    This manager is needed to avoid problems with tokens of trashed
+    but not already deleted databases and tables.
+    After 3 days (default) trashed databases and tables are deleted permanently,
+    and so are relative token permissions (because of the CASCADE option).
+    In the meanwhile, we need to filter out the trashed databases and tables.
+    """
+
+    def get_queryset(self):
+        trashed_Q = Q(database__trashed=True) | Q(table__trashed=True)
+        return super().get_queryset().filter(~trashed_Q)
+
+
+class TokenPermission(HierarchicalModelMixin, models.Model):
     """
     The existence of a permission indicates that the token has access to a table. If
     neither a database nor table is stored that means that the token has access to all
@@ -56,9 +81,12 @@ class TokenPermission(models.Model):
     means that the token has access to that table.
     """
 
+    objects = TokenPermissionManager()
+
     token = models.ForeignKey("database.Token", on_delete=models.CASCADE)
     type = models.CharField(
         max_length=6,
+        db_index=True,
         choices=(
             ("create", "Create"),
             ("read", "Read"),
@@ -72,3 +100,6 @@ class TokenPermission(models.Model):
     table = models.ForeignKey(
         "database.Table", on_delete=models.CASCADE, blank=True, null=True
     )
+
+    def get_parent(self):
+        return self.token

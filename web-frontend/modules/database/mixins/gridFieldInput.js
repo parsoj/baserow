@@ -1,4 +1,4 @@
-import { isCharacterKeyPress } from '@baserow/modules/core/utils/events'
+import { isPrintableUnicodeCharacterKeyPress } from '@baserow/modules/core/utils/events'
 
 /**
  * This mixin can be used with a grid view field if the field only needs an input. For
@@ -7,6 +7,10 @@ import { isCharacterKeyPress } from '@baserow/modules/core/utils/events'
 export default {
   data() {
     return {
+      /**
+       * Indicates whether the cell is opened.
+       */
+      opened: false,
       /**
        * Indicates whether the user is editing the value.
        */
@@ -18,11 +22,28 @@ export default {
     }
   },
   watch: {
-    copy(value) {
+    copy(newVal) {
       if (this.editing) {
-        this.$emit('edit', value, this.value)
+        const oldVal = this.value
+        this.$emit('edit', this.prepareValue(newVal), oldVal)
       }
     },
+  },
+  mounted() {
+    const leftMouseDownListener = (event) => {
+      // The `GridViewCell` component initiates the multiple selection when left
+      // clicking on the element. This is something we want to prevent while editing
+      // by stopping the propagation.
+      if (event.button === 0 && this.editing) {
+        event.stopPropagation()
+      }
+    }
+    this.$el.addEventListener('mousedown', leftMouseDownListener)
+    this.$el.addEventListener('click', leftMouseDownListener)
+    this.$once('hook:beforeDestroy', () => {
+      this.$el.removeEventListener('mousedown', leftMouseDownListener)
+      this.$el.removeEventListener('click', leftMouseDownListener)
+    })
   },
   methods: {
     /**
@@ -32,41 +53,66 @@ export default {
      * characters are pressed because that should replace the value.
      */
     select() {
-      this.$el.keydownEvent = (event) => {
+      const keydownListener = (event) => {
         // If the tab or arrow keys are pressed we don't want to do anything because
         // the GridViewField component will select the next field.
-        const ignoredKeys = [9, 37, 38, 39, 40]
-        if (ignoredKeys.includes(event.keyCode)) {
+        const ignoredKeys = [
+          'Tab',
+          'ArrowLeft',
+          'ArrowUp',
+          'ArrowRight',
+          'ArrowDown',
+        ]
+        if (ignoredKeys.includes(event.key)) {
+          return
+        }
+
+        // If the space bar key is pressed, and not editing, we don't want to do
+        // anything because it should open the row edit modal.
+        if (event.key === ' ' && !this.editing) {
           return
         }
 
         // If the escape key is pressed while editing we want to cancel the current
         // input and undo the editing state.
-        if (event.keyCode === 27 && this.editing) {
+        if (event.key === 'Escape' && this.editing) {
           this.cancel()
           return
         }
 
         // If the enter key is pressed.
-        if (event.keyCode === 13) {
+        if (event.key === 'Enter') {
           if (
             this.editing &&
             this.isValid() &&
             this.canSaveByPressingEnter(event)
           ) {
-            // While editing we want to save the changes.
+            // While editing we want to save the changes and select the cell below
+            // to improve the spreadsheet like experience.
             this.save()
+            this.$emit('selectBelow')
           } else if (!this.editing) {
             // If only selected we will start the editing mode.
             this.edit(null, event)
           }
-        } else if (!this.editing && isCharacterKeyPress(event)) {
-          // If another key was pressed while not editing we want to replace the
-          // exiting value with something new.
+        }
+
+        // If F2 is pressed we want to switch into editing mode
+        // with the current value of the cell
+        if (event.key === 'F2' && !this.editing) {
+          this.edit(null, event)
+        }
+
+        // If a printable key was pressed while not editing we want to replace the
+        // exiting value with something new.
+        if (!this.editing && isPrintableUnicodeCharacterKeyPress(event)) {
           this.edit('', event)
         }
       }
-      document.body.addEventListener('keydown', this.$el.keydownEvent)
+      document.body.addEventListener('keydown', keydownListener)
+      this.$once('unselected', () =>
+        document.body.removeEventListener('keydown', keydownListener)
+      )
     },
     /**
      * Event that is called wen the column is unselected, for example when clicked
@@ -74,12 +120,12 @@ export default {
      * need it. We will also save the changes if the user was editing.
      */
     beforeUnSelect() {
+      this.opened = false
       if (this.editing && this.isValid()) {
         this.save()
       } else {
         this.editing = false
       }
-      document.body.removeEventListener('keydown', this.$el.keydownEvent)
     },
     /**
      * Event that is called when the user double clicks in the column. In this case
@@ -94,13 +140,24 @@ export default {
      * Method that can be called to initiate the edit state.
      */
     edit(value = null, event = null) {
+      this.opened = true
       if (this.readOnly) {
         return
       }
 
       this.editing = true
-      this.copy = value === null ? this.value : value
-      this.afterEdit(event)
+      this.copy = this.prepareCopy(value === null ? this.value : value)
+      this.afterEdit(event, value)
+    },
+    /**
+     * Method that can be called after initiating the edit state to prepare the
+     * component version of the value. This can be overridden in the component.
+     */
+    prepareCopy(value) {
+      return value
+    },
+    prepareValue(copy) {
+      return copy
     },
     /**
      * Method that can be called when in the editing state. It will bring the
@@ -108,6 +165,7 @@ export default {
      * eventually save the changes.
      */
     save() {
+      this.opened = false
       this.editing = false
       const newValue = this.beforeSave(this.copy)
 
@@ -115,7 +173,6 @@ export default {
       if (newValue === this.value) {
         return
       }
-
       this.$emit('update', newValue, this.value)
       this.afterSave()
     },
@@ -124,8 +181,9 @@ export default {
      * without saving.
      */
     cancel() {
+      this.opened = false
       this.editing = false
-      this.copy = this.value
+      this.copy = this.prepareCopy(this.value)
       this.$emit('edit', this.value, this.value)
     },
     /**
@@ -160,27 +218,22 @@ export default {
      * previous field. The tab key stays enabled.
      */
     canSelectNext(event) {
-      const arrowKeys = [37, 38, 39, 40]
-      return !this.editing || !arrowKeys.includes(event.keyCode)
+      return !this.editing || event.key === 'Tab'
     },
     /**
      * If true the value can be saved by pressing the enter key. This could for
      * example be disabled for a long text field that can have multiple lines.
      */
-    canSaveByPressingEnter(event) {
+    canSaveByPressingEnter() {
       return true
     },
-    canCopy() {
-      return !this.editing
-    },
-    canPaste() {
-      return !this.editing
-    },
-    canEmpty() {
+    canKeyboardShortcut() {
       return !this.editing
     },
     getError() {
-      return this.getValidationError(this.editing ? this.copy : this.value)
+      return this.getValidationError(
+        this.editing ? this.prepareValue(this.copy) : this.value
+      )
     },
   },
 }

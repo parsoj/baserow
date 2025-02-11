@@ -3,7 +3,7 @@
     <div v-if="loading" class="loading-absolute-center"></div>
     <template v-else>
       <TemplateHeader
-        :group="group"
+        :workspace="workspace"
         :template="selectedTemplate"
         :category="selectedTemplateCategory"
         @installed="hide()"
@@ -14,9 +14,11 @@
         :selected-template="selectedTemplate"
         @selected="selectTemplate"
       >
-        <a class="modal__close" @click="hide()">
-          <i class="fas fa-times"></i>
-        </a>
+        <div class="modal__actions">
+          <a class="modal__close" @click="hide()">
+            <i class="iconoir-cancel"></i>
+          </a>
+        </div>
       </TemplateCategories>
       <TemplatePreview
         :template="selectedTemplate"
@@ -40,7 +42,7 @@ export default {
   components: { TemplateHeader, TemplateCategories, TemplatePreview },
   mixins: [modal],
   props: {
-    group: {
+    workspace: {
       type: Object,
       required: true,
     },
@@ -59,7 +61,7 @@ export default {
      * categories. They will be placed in the sidebar so that the user can select a
      * template to preview.
      */
-    async show(...args) {
+    async show(templateId = null, ...args) {
       modal.methods.show.call(this, ...args)
 
       this.loading = true
@@ -76,12 +78,17 @@ export default {
         this.hide()
       }
 
-      // Check if there is a default template, and if so select that template.
+      // If a template ID is provided when opening, then open that one, otherwise, open
+      // the default.
       for (let i = 0; i < this.categories.length; i++) {
         const category = this.categories[i]
         for (let i2 = 0; i2 < category.templates.length; i2++) {
           const template = category.templates[i2]
-          if (template.is_default) {
+          if (
+            (templateId === null && template.is_default) ||
+            (templateId !== null &&
+              (template.id === templateId || template.slug === templateId))
+          ) {
             this.$nextTick(() => {
               this.$refs.categories.selectCategory(category.id)
               this.selectTemplate({ template, category })

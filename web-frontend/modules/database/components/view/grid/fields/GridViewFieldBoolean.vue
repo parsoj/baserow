@@ -9,7 +9,7 @@
         }"
         @click="toggle(value)"
       >
-        <i class="fas fa-check grid-field-boolean__checkbox-icon"></i>
+        <i class="iconoir-check grid-field-boolean__checkbox-icon"></i>
       </div>
     </div>
   </div>
@@ -25,7 +25,7 @@ export default {
       // While the field is selected we want to toggle the value by pressing the enter
       // key.
       this.$el.keydownEvent = (event) => {
-        if (event.keyCode === 13) {
+        if (event.key === 'Enter') {
           this.toggle(this.value)
         }
       }

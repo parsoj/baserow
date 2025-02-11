@@ -1,6 +1,12 @@
-import pytest
 from unittest.mock import patch
 
+from django.contrib.contenttypes.models import ContentType
+from django.db import connection
+from django.shortcuts import reverse
+from django.test import override_settings
+from django.test.utils import CaptureQueriesContext
+
+import pytest
 from rest_framework.status import (
     HTTP_200_OK,
     HTTP_204_NO_CONTENT,
@@ -9,15 +15,22 @@ from rest_framework.status import (
     HTTP_404_NOT_FOUND,
 )
 
-from django.shortcuts import reverse
-from django.contrib.contenttypes.models import ContentType
-
-from baserow.contrib.database.views.models import View, ViewFilter, ViewSort, GridView
-from baserow.contrib.database.views.registries import (
-    view_type_registry,
-    view_filter_type_registry,
-)
+from baserow.contrib.database.api.constants import PUBLIC_PLACEHOLDER_ENTITY_ID
+from baserow.contrib.database.views.handler import ViewIndexingHandler
+from baserow.contrib.database.views.models import GridView, View
+from baserow.contrib.database.views.registries import view_type_registry
 from baserow.contrib.database.views.view_types import GridViewType
+from baserow.core.trash.handler import TrashHandler
+
+
+@pytest.fixture(autouse=True)
+def clean_registry_cache():
+    """
+    Ensure no patched version stays in cache.
+    """
+
+    view_type_registry.get_for_class.cache_clear()
+    yield
 
 
 @pytest.mark.django_db
@@ -76,13 +89,17 @@ def test_list_views(api_client, data_fixture):
     response = api_client.get(url)
     assert response.status_code == HTTP_401_UNAUTHORIZED
 
-    data_fixture.create_template(group=table_1.database.group)
+    data_fixture.create_template(workspace=table_1.database.workspace)
+    table_1.database.workspace.has_template.cache_clear()
     url = reverse("api:database:views:list", kwargs={"table_id": table_1.id})
     response = api_client.get(url)
     assert response.status_code == HTTP_200_OK
 
     response = api_client.delete(
-        reverse("api:groups:item", kwargs={"group_id": table_1.database.group.id}),
+        reverse(
+            "api:workspaces:item",
+            kwargs={"workspace_id": table_1.database.workspace.id},
+        ),
         HTTP_AUTHORIZATION=f"JWT {token}",
     )
     assert response.status_code == HTTP_204_NO_CONTENT
@@ -93,99 +110,115 @@ def test_list_views(api_client, data_fixture):
     assert response.json()["error"] == "ERROR_TABLE_DOES_NOT_EXIST"
 
 
+@override_settings(PERMISSION_MANAGERS=["basic"])
 @pytest.mark.django_db
-def test_list_views_including_filters(api_client, data_fixture):
-    user, token = data_fixture.create_user_and_token()
+def test_list_views_ownership_type(api_client, data_fixture):
+    user, token = data_fixture.create_user_and_token(
+        email="test@test.nl", password="password", first_name="Test1"
+    )
     table_1 = data_fixture.create_database_table(user=user)
-    table_2 = data_fixture.create_database_table()
-    field_1 = data_fixture.create_text_field(table=table_1)
-    field_2 = data_fixture.create_text_field(table=table_1)
-    field_3 = data_fixture.create_text_field(table=table_2)
-    view_1 = data_fixture.create_grid_view(table=table_1, order=1)
-    view_2 = data_fixture.create_grid_view(table=table_1, order=2)
-    view_3 = data_fixture.create_grid_view(table=table_2, order=1)
-    filter_1 = data_fixture.create_view_filter(view=view_1, field=field_1)
-    filter_2 = data_fixture.create_view_filter(view=view_1, field=field_2)
-    filter_3 = data_fixture.create_view_filter(view=view_2, field=field_1)
-    data_fixture.create_view_filter(view=view_3, field=field_3)
+    view_1 = data_fixture.create_grid_view(
+        table=table_1, order=1, ownership_type="collaborative"
+    )
+    view_2 = data_fixture.create_grid_view(
+        table=table_1, order=3, ownership_type="personal"
+    )
 
     response = api_client.get(
-        "{}".format(
-            reverse("api:database:views:list", kwargs={"table_id": table_1.id})
-        ),
-        HTTP_AUTHORIZATION=f"JWT {token}",
+        reverse("api:database:views:list", kwargs={"table_id": table_1.id}),
+        **{"HTTP_AUTHORIZATION": f"JWT {token}"},
     )
+
     assert response.status_code == HTTP_200_OK
     response_json = response.json()
     assert len(response_json) == 2
-    assert "filters" not in response_json[0]
-    assert "filters" not in response_json[1]
-
-    response = api_client.get(
-        "{}?include=filters".format(
-            reverse("api:database:views:list", kwargs={"table_id": table_1.id})
-        ),
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    assert response.status_code == HTTP_200_OK
-    response_json = response.json()
-
-    assert len(response_json[0]["filters"]) == 2
-    assert response_json[0]["filters"][0]["id"] == filter_1.id
-    assert response_json[0]["filters"][0]["view"] == view_1.id
-    assert response_json[0]["filters"][0]["field"] == field_1.id
-    assert response_json[0]["filters"][0]["type"] == filter_1.type
-    assert response_json[0]["filters"][0]["value"] == filter_1.value
-    assert response_json[0]["filters"][1]["id"] == filter_2.id
-    assert len(response_json[1]["filters"]) == 1
-    assert response_json[1]["filters"][0]["id"] == filter_3.id
 
 
 @pytest.mark.django_db
-def test_list_views_including_sortings(api_client, data_fixture):
-    user, token = data_fixture.create_user_and_token()
+def test_list_views_with_limit(api_client, data_fixture):
+    user, token = data_fixture.create_user_and_token(
+        email="test@test.nl", password="password", first_name="Test1"
+    )
+    table_1 = data_fixture.create_database_table(user=user)
+    view_1 = data_fixture.create_grid_view(table=table_1, order=1)
+    data_fixture.create_grid_view(table=table_1, order=3)
+
+    response = api_client.get(
+        reverse("api:database:views:list", kwargs={"table_id": table_1.id}),
+        {"limit": 1},
+        **{"HTTP_AUTHORIZATION": f"JWT {token}"},
+    )
+    assert response.status_code == HTTP_200_OK
+    response_json = response.json()
+    assert len(response_json) == 1
+    assert response_json[0]["id"] == view_1.id
+
+
+@pytest.mark.django_db
+def test_list_views_with_type_filter(api_client, data_fixture):
+    user, token = data_fixture.create_user_and_token(
+        email="test@test.nl", password="password", first_name="Test1"
+    )
+    table_1 = data_fixture.create_database_table(user=user)
+    grid = data_fixture.create_grid_view(table=table_1, order=1)
+    gallery = data_fixture.create_gallery_view(table=table_1, order=2)
+
+    response = api_client.get(
+        reverse("api:database:views:list", kwargs={"table_id": table_1.id}),
+        {"type": "grid"},
+        **{"HTTP_AUTHORIZATION": f"JWT {token}"},
+    )
+    assert response.status_code == HTTP_200_OK
+    response_json = response.json()
+    assert len(response_json) == 1
+    assert response_json[0]["id"] == grid.id
+
+    response = api_client.get(
+        reverse("api:database:views:list", kwargs={"table_id": table_1.id}),
+        {"type": "gallery"},
+        **{"HTTP_AUTHORIZATION": f"JWT {token}"},
+    )
+    assert response.status_code == HTTP_200_OK
+    response_json = response.json()
+    assert len(response_json) == 1
+    assert response_json[0]["id"] == gallery.id
+
+
+@pytest.mark.django_db
+def test_list_views_doesnt_do_n_queries(api_client, data_fixture):
+    user, token = data_fixture.create_user_and_token(
+        email="test@test.nl", password="password", first_name="Test1"
+    )
     table_1 = data_fixture.create_database_table(user=user)
     table_2 = data_fixture.create_database_table()
-    field_1 = data_fixture.create_text_field(table=table_1)
-    field_2 = data_fixture.create_text_field(table=table_1)
-    field_3 = data_fixture.create_text_field(table=table_2)
     view_1 = data_fixture.create_grid_view(table=table_1, order=1)
-    view_2 = data_fixture.create_grid_view(table=table_1, order=2)
-    view_3 = data_fixture.create_grid_view(table=table_2, order=1)
-    sort_1 = data_fixture.create_view_sort(view=view_1, field=field_1)
-    sort_2 = data_fixture.create_view_sort(view=view_1, field=field_2)
-    sort_3 = data_fixture.create_view_sort(view=view_2, field=field_1)
-    data_fixture.create_view_sort(view=view_3, field=field_3)
-
-    response = api_client.get(
-        "{}".format(
-            reverse("api:database:views:list", kwargs={"table_id": table_1.id})
-        ),
-        HTTP_AUTHORIZATION=f"JWT {token}",
+    view_2 = data_fixture.create_grid_view(table=table_1, order=3)
+    view_3 = data_fixture.create_grid_view(
+        table=table_1, order=2, filter_type="OR", filters_disabled=True
     )
-    assert response.status_code == HTTP_200_OK
-    response_json = response.json()
-    assert len(response_json) == 2
-    assert "sortings" not in response_json[0]
-    assert "sortings" not in response_json[1]
+    data_fixture.create_grid_view(table=table_2, order=1)
 
-    response = api_client.get(
-        "{}?include=sortings".format(
-            reverse("api:database:views:list", kwargs={"table_id": table_1.id})
-        ),
-        HTTP_AUTHORIZATION=f"JWT {token}",
+    with CaptureQueriesContext(connection) as query_for_n:
+        response = api_client.get(
+            reverse("api:database:views:list", kwargs={"table_id": table_1.id}),
+            **{"HTTP_AUTHORIZATION": f"JWT {token}"},
+        )
+        assert response.status_code == HTTP_200_OK
+        response_json = response.json()
+
+    view_4 = data_fixture.create_grid_view(table=table_1, order=3)
+
+    with CaptureQueriesContext(connection) as query_for_n_plus_one:
+        response = api_client.get(
+            reverse("api:database:views:list", kwargs={"table_id": table_1.id}),
+            **{"HTTP_AUTHORIZATION": f"JWT {token}"},
+        )
+        assert response.status_code == HTTP_200_OK
+        response_json = response.json()
+
+    assert len(query_for_n.captured_queries) >= len(
+        query_for_n_plus_one.captured_queries
     )
-    assert response.status_code == HTTP_200_OK
-    response_json = response.json()
-
-    assert len(response_json[0]["sortings"]) == 2
-    assert response_json[0]["sortings"][0]["id"] == sort_1.id
-    assert response_json[0]["sortings"][0]["view"] == view_1.id
-    assert response_json[0]["sortings"][0]["field"] == field_1.id
-    assert response_json[0]["sortings"][0]["order"] == sort_1.order
-    assert response_json[0]["sortings"][1]["id"] == sort_2.id
-    assert len(response_json[1]["sortings"]) == 1
-    assert response_json[1]["sortings"][0]["id"] == sort_3.id
 
 
 @pytest.mark.django_db
@@ -196,7 +229,7 @@ def test_get_view(api_client, data_fixture):
     table_2 = data_fixture.create_database_table(user=user_2)
     view = data_fixture.create_grid_view(table=table)
     view_2 = data_fixture.create_grid_view(table=table_2)
-    filter = data_fixture.create_view_filter(view=view)
+    view_filter = data_fixture.create_view_filter(view=view)
 
     url = reverse("api:database:views:item", kwargs={"view_id": view_2.id})
     response = api_client.get(url, format="json", HTTP_AUTHORIZATION=f"JWT {token}")
@@ -219,10 +252,12 @@ def test_get_view(api_client, data_fixture):
     assert not response_json["filters_disabled"]
     assert "filters" not in response_json
     assert "sortings" not in response_json
+    assert "group_bys" not in response_json
+    assert "decorations" not in response_json
 
     url = reverse("api:database:views:item", kwargs={"view_id": view.id})
     response = api_client.get(
-        "{}?include=filters,sortings".format(url),
+        "{}?include=filters,sortings,group_bys,decorations".format(url),
         format="json",
         HTTP_AUTHORIZATION=f"JWT {token}",
     )
@@ -230,15 +265,20 @@ def test_get_view(api_client, data_fixture):
     assert response.status_code == HTTP_200_OK
     assert response_json["id"] == view.id
     assert len(response_json["filters"]) == 1
-    assert response_json["filters"][0]["id"] == filter.id
-    assert response_json["filters"][0]["view"] == filter.view_id
-    assert response_json["filters"][0]["field"] == filter.field_id
-    assert response_json["filters"][0]["type"] == filter.type
-    assert response_json["filters"][0]["value"] == filter.value
+    assert response_json["filters"][0]["id"] == view_filter.id
+    assert response_json["filters"][0]["view"] == view_filter.view_id
+    assert response_json["filters"][0]["field"] == view_filter.field_id
+    assert response_json["filters"][0]["type"] == view_filter.type
+    assert response_json["filters"][0]["value"] == view_filter.value
     assert response_json["sortings"] == []
+    assert response_json["decorations"] == []
+    assert response_json["group_bys"] == []
 
     response = api_client.delete(
-        reverse("api:groups:item", kwargs={"group_id": view.table.database.group.id}),
+        reverse(
+            "api:workspaces:item",
+            kwargs={"workspace_id": view.table.database.workspace.id},
+        ),
         HTTP_AUTHORIZATION=f"JWT {token}",
     )
     assert response.status_code == HTTP_204_NO_CONTENT
@@ -280,6 +320,80 @@ def test_delete_view(api_client, data_fixture):
 
 
 @pytest.mark.django_db
+def test_duplicate_views(api_client, data_fixture):
+    user, token = data_fixture.create_user_and_token(
+        email="test@test.nl", password="password", first_name="Test1"
+    )
+    table_1 = data_fixture.create_database_table(user=user)
+    field = data_fixture.create_text_field(table=table_1)
+    table_2 = data_fixture.create_database_table()
+    view_1 = data_fixture.create_grid_view(table=table_1, order=1)
+    view_2 = data_fixture.create_grid_view(table=table_2, order=2)
+    view_3 = data_fixture.create_grid_view(table=table_1, order=3)
+
+    field_option = data_fixture.create_grid_view_field_option(
+        grid_view=view_1,
+        field=field,
+        aggregation_type="whatever",
+        aggregation_raw_type="empty",
+    )
+    view_filter_group = data_fixture.create_view_filter_group(view=view_1)
+    view_filter = data_fixture.create_view_filter(
+        view=view_1,
+        field=field,
+        value="test",
+        type="equal",
+        group=view_filter_group,
+    )
+    view_sort = data_fixture.create_view_sort(view=view_1, field=field, order="ASC")
+    view_group_by = data_fixture.create_view_group_by(
+        view=view_1, field=field, order="ASC"
+    )
+
+    view_decoration = data_fixture.create_view_decoration(
+        view=view_1,
+        value_provider_conf={"config": 12},
+    )
+
+    response = api_client.post(
+        reverse("api:database:views:duplicate", kwargs={"view_id": view_2.id}),
+        format="json",
+        HTTP_AUTHORIZATION=f"JWT {token}",
+    )
+    assert response.status_code == HTTP_400_BAD_REQUEST
+    assert response.json()["error"] == "ERROR_USER_NOT_IN_GROUP"
+
+    response = api_client.post(
+        reverse("api:database:views:duplicate", kwargs={"view_id": 999999}),
+        format="json",
+        HTTP_AUTHORIZATION=f"JWT {token}",
+    )
+    assert response.status_code == HTTP_404_NOT_FOUND
+    assert response.json()["error"] == "ERROR_VIEW_DOES_NOT_EXIST"
+
+    assert View.objects.count() == 3
+
+    response = api_client.post(
+        reverse("api:database:views:duplicate", kwargs={"view_id": view_1.id}),
+        format="json",
+        HTTP_AUTHORIZATION=f"JWT {token}",
+    )
+
+    response_json = response.json()
+    assert response.status_code == HTTP_200_OK
+
+    assert View.objects.count() == 4
+
+    assert response_json["id"] != view_1.id
+    assert response_json["order"] == view_1.order + 1
+    assert len(response_json["sortings"]) == 1
+    assert len(response_json["filters"]) == 1
+    assert len(response_json["filter_groups"]) == 1
+    assert len(response_json["decorations"]) == 1
+    assert len(response_json["group_bys"]) == 1
+
+
+@pytest.mark.django_db
 def test_order_views(api_client, data_fixture):
     user, token = data_fixture.create_user_and_token(
         email="test@test.nl", password="password", first_name="Test1"
@@ -297,7 +411,7 @@ def test_order_views(api_client, data_fixture):
         HTTP_AUTHORIZATION=f"JWT {token}",
     )
     assert response.status_code == HTTP_400_BAD_REQUEST
-    assert response.json()["error"] == "ERROR_USER_NOT_IN_GROUP"
+    assert response.json()["error"] == "ERROR_REQUEST_BODY_VALIDATION"
 
     response = api_client.post(
         reverse("api:database:views:order", kwargs={"table_id": 999999}),
@@ -305,8 +419,8 @@ def test_order_views(api_client, data_fixture):
         format="json",
         HTTP_AUTHORIZATION=f"JWT {token}",
     )
-    assert response.status_code == HTTP_404_NOT_FOUND
-    assert response.json()["error"] == "ERROR_TABLE_DOES_NOT_EXIST"
+    assert response.status_code == HTTP_400_BAD_REQUEST
+    assert response.json()["error"] == "ERROR_REQUEST_BODY_VALIDATION"
 
     response = api_client.post(
         reverse("api:database:views:order", kwargs={"table_id": table_1.id}),
@@ -328,7 +442,9 @@ def test_order_views(api_client, data_fixture):
 
     response = api_client.post(
         reverse("api:database:views:order", kwargs={"table_id": table_1.id}),
-        {"view_ids": [view_3.id, view_2.id, view_1.id]},
+        {
+            "view_ids": [view_3.id, view_2.id, view_1.id],
+        },
         format="json",
         HTTP_AUTHORIZATION=f"JWT {token}",
     )
@@ -340,810 +456,6 @@ def test_order_views(api_client, data_fixture):
     assert view_1.order == 3
     assert view_2.order == 2
     assert view_3.order == 1
-
-
-@pytest.mark.django_db
-def test_list_view_filters(api_client, data_fixture):
-    user, token = data_fixture.create_user_and_token()
-    table_1 = data_fixture.create_database_table(user=user)
-    table_2 = data_fixture.create_database_table()
-    field_1 = data_fixture.create_text_field(table=table_1)
-    field_2 = data_fixture.create_text_field(table=table_1)
-    field_3 = data_fixture.create_text_field(table=table_2)
-    view_1 = data_fixture.create_grid_view(table=table_1, order=1)
-    view_2 = data_fixture.create_grid_view(table=table_1, order=2)
-    view_3 = data_fixture.create_grid_view(table=table_2, order=1)
-    filter_1 = data_fixture.create_view_filter(view=view_1, field=field_1)
-    filter_2 = data_fixture.create_view_filter(view=view_1, field=field_2)
-    data_fixture.create_view_filter(view=view_2, field=field_1)
-    data_fixture.create_view_filter(view=view_3, field=field_3)
-
-    response = api_client.get(
-        reverse("api:database:views:list_filters", kwargs={"view_id": view_3.id}),
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    assert response.status_code == HTTP_400_BAD_REQUEST
-    assert response.json()["error"] == "ERROR_USER_NOT_IN_GROUP"
-
-    response = api_client.get(
-        reverse("api:database:views:list_filters", kwargs={"view_id": 999999}),
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    assert response.status_code == HTTP_404_NOT_FOUND
-    assert response.json()["error"] == "ERROR_VIEW_DOES_NOT_EXIST"
-
-    response = api_client.get(
-        reverse("api:database:views:list_filters", kwargs={"view_id": view_1.id}),
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    response_json = response.json()
-    assert len(response_json) == 2
-    assert response_json[0]["id"] == filter_1.id
-    assert response_json[0]["view"] == view_1.id
-    assert response_json[0]["field"] == field_1.id
-    assert response_json[0]["type"] == filter_1.type
-    assert response_json[0]["value"] == filter_1.value
-    assert response_json[1]["id"] == filter_2.id
-
-    response = api_client.delete(
-        reverse("api:groups:item", kwargs={"group_id": table_1.database.group.id}),
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    assert response.status_code == HTTP_204_NO_CONTENT
-    response = api_client.get(
-        reverse("api:database:views:list_filters", kwargs={"view_id": view_1.id}),
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    assert response.status_code == HTTP_404_NOT_FOUND
-    assert response.json()["error"] == "ERROR_VIEW_DOES_NOT_EXIST"
-
-
-@pytest.mark.django_db
-def test_create_view_filter(api_client, data_fixture):
-    user, token = data_fixture.create_user_and_token()
-    table_1 = data_fixture.create_database_table(user=user)
-    table_2 = data_fixture.create_database_table()
-    field_1 = data_fixture.create_text_field(table=table_1)
-    field_2 = data_fixture.create_text_field(table=table_2)
-    view_1 = data_fixture.create_grid_view(table=table_1)
-    view_2 = data_fixture.create_grid_view(table=table_2)
-
-    response = api_client.post(
-        reverse("api:database:views:list_filters", kwargs={"view_id": view_2.id}),
-        {"field": field_2.id, "type": "equal", "value": "test"},
-        format="json",
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    assert response.status_code == HTTP_400_BAD_REQUEST
-    assert response.json()["error"] == "ERROR_USER_NOT_IN_GROUP"
-
-    response = api_client.post(
-        reverse("api:database:views:list_filters", kwargs={"view_id": 99999}),
-        {"field": field_1.id, "type": "equal", "value": "test"},
-        format="json",
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    assert response.status_code == HTTP_404_NOT_FOUND
-    assert response.json()["error"] == "ERROR_VIEW_DOES_NOT_EXIST"
-
-    response = api_client.post(
-        reverse("api:database:views:list_filters", kwargs={"view_id": view_1.id}),
-        {"field": 9999999, "type": "NOT_EXISTING", "not_value": "test"},
-        format="json",
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    response_json = response.json()
-    assert response.status_code == HTTP_400_BAD_REQUEST
-    assert response_json["error"] == "ERROR_REQUEST_BODY_VALIDATION"
-    assert response_json["detail"]["field"][0]["code"] == "does_not_exist"
-    assert response_json["detail"]["type"][0]["code"] == "invalid_choice"
-
-    response = api_client.post(
-        reverse("api:database:views:list_filters", kwargs={"view_id": view_1.id}),
-        {"field": field_2.id, "type": "equal", "value": "test"},
-        format="json",
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    response_json = response.json()
-    assert response.status_code == HTTP_400_BAD_REQUEST
-    assert response_json["error"] == "ERROR_FIELD_NOT_IN_TABLE"
-
-    grid_view_type = view_type_registry.get("grid")
-    grid_view_type.can_filter = False
-    response = api_client.post(
-        reverse("api:database:views:list_filters", kwargs={"view_id": view_1.id}),
-        {"field": field_1.id, "type": "equal", "value": "test"},
-        format="json",
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    response_json = response.json()
-    assert response.status_code == HTTP_400_BAD_REQUEST
-    assert response_json["error"] == "ERROR_VIEW_FILTER_NOT_SUPPORTED"
-    grid_view_type.can_filter = True
-
-    equal_filter_type = view_filter_type_registry.get("equal")
-    allowed = equal_filter_type.compatible_field_types
-    equal_filter_type.compatible_field_types = []
-    response = api_client.post(
-        reverse("api:database:views:list_filters", kwargs={"view_id": view_1.id}),
-        {"field": field_1.id, "type": "equal", "value": "test"},
-        format="json",
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    response_json = response.json()
-    assert response.status_code == HTTP_400_BAD_REQUEST
-    assert response_json["error"] == "ERROR_VIEW_FILTER_TYPE_UNSUPPORTED_FIELD"
-    equal_filter_type.compatible_field_types = allowed
-
-    response = api_client.post(
-        reverse("api:database:views:list_filters", kwargs={"view_id": view_1.id}),
-        {"field": field_1.id, "type": "equal", "value": "test"},
-        format="json",
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    response_json = response.json()
-    assert response.status_code == HTTP_200_OK
-    assert ViewFilter.objects.all().count() == 1
-    first = ViewFilter.objects.all().first()
-    assert response_json["id"] == first.id
-    assert response_json["view"] == view_1.id
-    assert response_json["field"] == field_1.id
-    assert response_json["type"] == "equal"
-    assert response_json["value"] == "test"
-
-    response = api_client.post(
-        reverse("api:database:views:list_filters", kwargs={"view_id": view_1.id}),
-        {"field": field_1.id, "type": "equal", "value": ""},
-        format="json",
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    response_json = response.json()
-    assert response.status_code == HTTP_200_OK
-    assert response_json["value"] == ""
-
-    response = api_client.post(
-        reverse("api:database:views:list_filters", kwargs={"view_id": view_1.id}),
-        {"field": field_1.id, "type": "equal"},
-        format="json",
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    response_json = response.json()
-    assert response.status_code == HTTP_200_OK
-    assert response_json["value"] == ""
-
-
-@pytest.mark.django_db
-def test_get_view_filter(api_client, data_fixture):
-    user, token = data_fixture.create_user_and_token()
-    filter_1 = data_fixture.create_view_filter(user=user, value="test")
-    filter_2 = data_fixture.create_view_filter()
-
-    response = api_client.get(
-        reverse(
-            "api:database:views:filter_item", kwargs={"view_filter_id": filter_2.id}
-        ),
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    assert response.status_code == HTTP_400_BAD_REQUEST
-    assert response.json()["error"] == "ERROR_USER_NOT_IN_GROUP"
-
-    response = api_client.get(
-        reverse("api:database:views:filter_item", kwargs={"view_filter_id": 99999}),
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    assert response.status_code == HTTP_404_NOT_FOUND
-    assert response.json()["error"] == "ERROR_VIEW_FILTER_DOES_NOT_EXIST"
-
-    response = api_client.get(
-        reverse(
-            "api:database:views:filter_item", kwargs={"view_filter_id": filter_1.id}
-        ),
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    response_json = response.json()
-    assert response.status_code == HTTP_200_OK
-    assert ViewFilter.objects.all().count() == 2
-    first = ViewFilter.objects.get(pk=filter_1.id)
-    assert response_json["id"] == first.id
-    assert response_json["view"] == first.view_id
-    assert response_json["field"] == first.field_id
-    assert response_json["type"] == "equal"
-    assert response_json["value"] == "test"
-
-    response = api_client.delete(
-        reverse(
-            "api:groups:item",
-            kwargs={"group_id": filter_1.view.table.database.group.id},
-        ),
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    assert response.status_code == HTTP_204_NO_CONTENT
-
-    response = api_client.get(
-        reverse(
-            "api:database:views:filter_item", kwargs={"view_filter_id": filter_1.id}
-        ),
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    assert response.status_code == HTTP_404_NOT_FOUND
-    assert response.json()["error"] == "ERROR_VIEW_FILTER_DOES_NOT_EXIST"
-
-
-@pytest.mark.django_db
-def test_update_view_filter(api_client, data_fixture):
-    user, token = data_fixture.create_user_and_token()
-    filter_1 = data_fixture.create_view_filter(user=user, value="test")
-    filter_2 = data_fixture.create_view_filter()
-    field_1 = data_fixture.create_text_field(table=filter_1.view.table)
-    field_2 = data_fixture.create_text_field()
-
-    response = api_client.patch(
-        reverse(
-            "api:database:views:filter_item", kwargs={"view_filter_id": filter_2.id}
-        ),
-        {"value": "test"},
-        format="json",
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    assert response.status_code == HTTP_400_BAD_REQUEST
-    assert response.json()["error"] == "ERROR_USER_NOT_IN_GROUP"
-
-    response = api_client.patch(
-        reverse("api:database:views:filter_item", kwargs={"view_filter_id": 9999}),
-        {"value": "test"},
-        format="json",
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    assert response.status_code == HTTP_404_NOT_FOUND
-    assert response.json()["error"] == "ERROR_VIEW_FILTER_DOES_NOT_EXIST"
-
-    response = api_client.patch(
-        reverse(
-            "api:database:views:filter_item", kwargs={"view_filter_id": filter_1.id}
-        ),
-        {
-            "field": 9999999,
-            "type": "NOT_EXISTING",
-        },
-        format="json",
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    response_json = response.json()
-    assert response.status_code == HTTP_400_BAD_REQUEST
-    assert response_json["error"] == "ERROR_REQUEST_BODY_VALIDATION"
-    assert response_json["detail"]["field"][0]["code"] == "does_not_exist"
-    assert response_json["detail"]["type"][0]["code"] == "invalid_choice"
-
-    response = api_client.patch(
-        reverse(
-            "api:database:views:filter_item", kwargs={"view_filter_id": filter_1.id}
-        ),
-        {"field": field_2.id},
-        format="json",
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    response_json = response.json()
-    assert response.status_code == HTTP_400_BAD_REQUEST
-    assert response_json["error"] == "ERROR_FIELD_NOT_IN_TABLE"
-
-    equal_filter_type = view_filter_type_registry.get("not_equal")
-    allowed = equal_filter_type.compatible_field_types
-    equal_filter_type.compatible_field_types = []
-    grid_view_type = view_type_registry.get("grid")
-    grid_view_type.can_filter = False
-    response = api_client.patch(
-        reverse(
-            "api:database:views:filter_item", kwargs={"view_filter_id": filter_1.id}
-        ),
-        {"type": "not_equal"},
-        format="json",
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    grid_view_type.can_filter = True
-    response_json = response.json()
-    assert response.status_code == HTTP_400_BAD_REQUEST
-    assert response_json["error"] == "ERROR_VIEW_FILTER_TYPE_UNSUPPORTED_FIELD"
-    equal_filter_type.compatible_field_types = allowed
-
-    response = api_client.patch(
-        reverse(
-            "api:database:views:filter_item", kwargs={"view_filter_id": filter_1.id}
-        ),
-        {"field": field_1.id, "type": "not_equal", "value": "test 2"},
-        format="json",
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    response_json = response.json()
-    assert response.status_code == HTTP_200_OK
-    assert ViewFilter.objects.all().count() == 2
-    first = ViewFilter.objects.get(pk=filter_1.id)
-    assert first.field_id == field_1.id
-    assert first.type == "not_equal"
-    assert first.value == "test 2"
-    assert response_json["id"] == first.id
-    assert response_json["view"] == first.view_id
-    assert response_json["field"] == field_1.id
-    assert response_json["type"] == "not_equal"
-    assert response_json["value"] == "test 2"
-
-    response = api_client.patch(
-        reverse(
-            "api:database:views:filter_item", kwargs={"view_filter_id": filter_1.id}
-        ),
-        {"type": "equal"},
-        format="json",
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    response_json = response.json()
-    assert response.status_code == HTTP_200_OK
-    first = ViewFilter.objects.get(pk=filter_1.id)
-    assert first.field_id == field_1.id
-    assert first.type == "equal"
-    assert first.value == "test 2"
-    assert response_json["id"] == first.id
-    assert response_json["field"] == field_1.id
-    assert response_json["type"] == "equal"
-    assert response_json["value"] == "test 2"
-
-    response = api_client.patch(
-        reverse(
-            "api:database:views:filter_item", kwargs={"view_filter_id": filter_1.id}
-        ),
-        {"value": "test 3"},
-        format="json",
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    response_json = response.json()
-    assert response.status_code == HTTP_200_OK
-    first = ViewFilter.objects.get(pk=filter_1.id)
-    assert first.field_id == field_1.id
-    assert first.type == "equal"
-    assert first.value == "test 3"
-    assert response_json["id"] == first.id
-    assert response_json["view"] == first.view_id
-    assert response_json["field"] == field_1.id
-    assert response_json["type"] == "equal"
-    assert response_json["value"] == "test 3"
-
-    response = api_client.patch(
-        reverse(
-            "api:database:views:filter_item", kwargs={"view_filter_id": filter_1.id}
-        ),
-        {"value": ""},
-        format="json",
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    response_json = response.json()
-    assert response.status_code == HTTP_200_OK
-    first = ViewFilter.objects.get(pk=filter_1.id)
-    assert first.value == ""
-    assert response_json["value"] == ""
-
-
-@pytest.mark.django_db
-def test_delete_view_filter(api_client, data_fixture):
-    user, token = data_fixture.create_user_and_token()
-    filter_1 = data_fixture.create_view_filter(user=user, value="test")
-    filter_2 = data_fixture.create_view_filter()
-
-    response = api_client.delete(
-        reverse(
-            "api:database:views:filter_item", kwargs={"view_filter_id": filter_2.id}
-        ),
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    assert response.status_code == HTTP_400_BAD_REQUEST
-    assert response.json()["error"] == "ERROR_USER_NOT_IN_GROUP"
-
-    response = api_client.delete(
-        reverse("api:database:views:filter_item", kwargs={"view_filter_id": 9999}),
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    assert response.status_code == HTTP_404_NOT_FOUND
-    assert response.json()["error"] == "ERROR_VIEW_FILTER_DOES_NOT_EXIST"
-
-    response = api_client.delete(
-        reverse(
-            "api:database:views:filter_item", kwargs={"view_filter_id": filter_1.id}
-        ),
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    assert response.status_code == 204
-    assert ViewFilter.objects.all().count() == 1
-
-
-@pytest.mark.django_db
-def test_list_view_sortings(api_client, data_fixture):
-    user, token = data_fixture.create_user_and_token()
-    table_1 = data_fixture.create_database_table(user=user)
-    table_2 = data_fixture.create_database_table()
-    field_1 = data_fixture.create_text_field(table=table_1)
-    field_2 = data_fixture.create_text_field(table=table_1)
-    field_3 = data_fixture.create_text_field(table=table_2)
-    view_1 = data_fixture.create_grid_view(table=table_1, order=1)
-    data_fixture.create_grid_view(table=table_1, order=2)
-    view_3 = data_fixture.create_grid_view(table=table_2, order=1)
-    sort_1 = data_fixture.create_view_sort(view=view_1, field=field_1)
-    sort_2 = data_fixture.create_view_sort(view=view_1, field=field_2)
-    data_fixture.create_view_sort(view=view_3, field=field_3)
-
-    response = api_client.get(
-        reverse("api:database:views:list_sortings", kwargs={"view_id": view_3.id}),
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    assert response.status_code == HTTP_400_BAD_REQUEST
-    assert response.json()["error"] == "ERROR_USER_NOT_IN_GROUP"
-
-    response = api_client.get(
-        reverse("api:database:views:list_sortings", kwargs={"view_id": 999999}),
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    assert response.status_code == HTTP_404_NOT_FOUND
-    assert response.json()["error"] == "ERROR_VIEW_DOES_NOT_EXIST"
-
-    response = api_client.get(
-        reverse("api:database:views:list_sortings", kwargs={"view_id": view_1.id}),
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    response_json = response.json()
-    assert len(response_json) == 2
-    assert response_json[0]["id"] == sort_1.id
-    assert response_json[0]["view"] == view_1.id
-    assert response_json[0]["field"] == field_1.id
-    assert response_json[0]["order"] == sort_1.order
-    assert response_json[1]["id"] == sort_2.id
-
-    response = api_client.delete(
-        reverse(
-            "api:groups:item",
-            kwargs={"group_id": view_1.table.database.group.id},
-        ),
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    assert response.status_code == HTTP_204_NO_CONTENT
-
-    response = api_client.get(
-        reverse("api:database:views:list_sortings", kwargs={"view_id": view_1.id}),
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    assert response.status_code == HTTP_404_NOT_FOUND
-    assert response.json()["error"] == "ERROR_VIEW_DOES_NOT_EXIST"
-
-
-@pytest.mark.django_db
-def test_create_view_sort(api_client, data_fixture):
-    user, token = data_fixture.create_user_and_token()
-    table_1 = data_fixture.create_database_table(user=user)
-    table_2 = data_fixture.create_database_table()
-    field_1 = data_fixture.create_text_field(table=table_1)
-    field_2 = data_fixture.create_text_field(table=table_2)
-    field_3 = data_fixture.create_text_field(table=table_1)
-    field_4 = data_fixture.create_text_field(table=table_1)
-    link_row_field = data_fixture.create_link_row_field(table=table_1)
-    view_1 = data_fixture.create_grid_view(table=table_1)
-    view_2 = data_fixture.create_grid_view(table=table_2)
-
-    response = api_client.post(
-        reverse("api:database:views:list_sortings", kwargs={"view_id": view_2.id}),
-        {
-            "field": field_2.id,
-            "order": "ASC",
-        },
-        format="json",
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    assert response.status_code == HTTP_400_BAD_REQUEST
-    assert response.json()["error"] == "ERROR_USER_NOT_IN_GROUP"
-
-    response = api_client.post(
-        reverse("api:database:views:list_sortings", kwargs={"view_id": 99999}),
-        {"field": field_1.id, "order": "ASC", "value": "test"},
-        format="json",
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    assert response.status_code == HTTP_404_NOT_FOUND
-    assert response.json()["error"] == "ERROR_VIEW_DOES_NOT_EXIST"
-
-    response = api_client.post(
-        reverse("api:database:views:list_sortings", kwargs={"view_id": view_1.id}),
-        {"field": 9999999, "order": "NOT_EXISTING"},
-        format="json",
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    response_json = response.json()
-    assert response.status_code == HTTP_400_BAD_REQUEST
-    assert response_json["error"] == "ERROR_REQUEST_BODY_VALIDATION"
-    assert response_json["detail"]["field"][0]["code"] == "does_not_exist"
-    assert response_json["detail"]["order"][0]["code"] == "invalid_choice"
-
-    response = api_client.post(
-        reverse("api:database:views:list_sortings", kwargs={"view_id": view_1.id}),
-        {
-            "field": field_2.id,
-            "order": "ASC",
-        },
-        format="json",
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    response_json = response.json()
-    assert response.status_code == HTTP_400_BAD_REQUEST
-    assert response_json["error"] == "ERROR_FIELD_NOT_IN_TABLE"
-
-    grid_view_type = view_type_registry.get("grid")
-    grid_view_type.can_sort = False
-    response = api_client.post(
-        reverse("api:database:views:list_sortings", kwargs={"view_id": view_1.id}),
-        {"field": field_1.id, "order": "ASC"},
-        format="json",
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    response_json = response.json()
-    assert response.status_code == HTTP_400_BAD_REQUEST
-    assert response_json["error"] == "ERROR_VIEW_SORT_NOT_SUPPORTED"
-    grid_view_type.can_sort = True
-
-    response = api_client.post(
-        reverse("api:database:views:list_sortings", kwargs={"view_id": view_1.id}),
-        {"field": link_row_field.id, "order": "ASC"},
-        format="json",
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    response_json = response.json()
-    assert response.status_code == HTTP_400_BAD_REQUEST
-    assert response_json["error"] == "ERROR_VIEW_SORT_FIELD_NOT_SUPPORTED"
-
-    response = api_client.post(
-        reverse("api:database:views:list_sortings", kwargs={"view_id": view_1.id}),
-        {"field": field_1.id, "order": "ASC"},
-        format="json",
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    response_json = response.json()
-    assert response.status_code == HTTP_200_OK
-    assert ViewSort.objects.all().count() == 1
-    first = ViewSort.objects.all().first()
-    assert response_json["id"] == first.id
-    assert response_json["view"] == view_1.id
-    assert response_json["field"] == field_1.id
-    assert response_json["order"] == "ASC"
-
-    response = api_client.post(
-        reverse("api:database:views:list_sortings", kwargs={"view_id": view_1.id}),
-        {"field": field_1.id, "order": "ASC"},
-        format="json",
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    response_json = response.json()
-    assert response.status_code == HTTP_400_BAD_REQUEST
-    assert response_json["error"] == "ERROR_VIEW_SORT_FIELD_ALREADY_EXISTS"
-
-    response = api_client.post(
-        reverse("api:database:views:list_sortings", kwargs={"view_id": view_1.id}),
-        {"field": field_3.id, "order": "DESC"},
-        format="json",
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    response_json = response.json()
-    assert response.status_code == HTTP_200_OK
-    assert response_json["order"] == "DESC"
-
-    response = api_client.post(
-        reverse("api:database:views:list_sortings", kwargs={"view_id": view_1.id}),
-        {
-            "field": field_4.id,
-        },
-        format="json",
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    response_json = response.json()
-    assert response.status_code == HTTP_200_OK
-    assert response_json["order"] == "ASC"
-
-    assert ViewSort.objects.all().count() == 3
-
-
-@pytest.mark.django_db
-def test_get_view_sort(api_client, data_fixture):
-    user, token = data_fixture.create_user_and_token()
-    sort_1 = data_fixture.create_view_sort(user=user, order="DESC")
-    sort_2 = data_fixture.create_view_sort()
-
-    response = api_client.get(
-        reverse("api:database:views:sort_item", kwargs={"view_sort_id": sort_2.id}),
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    assert response.status_code == HTTP_400_BAD_REQUEST
-    assert response.json()["error"] == "ERROR_USER_NOT_IN_GROUP"
-
-    response = api_client.get(
-        reverse("api:database:views:sort_item", kwargs={"view_sort_id": 99999}),
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    assert response.status_code == HTTP_404_NOT_FOUND
-    assert response.json()["error"] == "ERROR_VIEW_SORT_DOES_NOT_EXIST"
-
-    response = api_client.get(
-        reverse("api:database:views:sort_item", kwargs={"view_sort_id": sort_1.id}),
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    response_json = response.json()
-    assert response.status_code == HTTP_200_OK
-    assert ViewSort.objects.all().count() == 2
-    first = ViewSort.objects.get(pk=sort_1.id)
-    assert response_json["id"] == first.id
-    assert response_json["view"] == first.view_id
-    assert response_json["field"] == first.field_id
-    assert response_json["order"] == "DESC"
-
-    response = api_client.delete(
-        reverse(
-            "api:groups:item",
-            kwargs={"group_id": sort_1.view.table.database.group.id},
-        ),
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    assert response.status_code == HTTP_204_NO_CONTENT
-
-    response = api_client.get(
-        reverse("api:database:views:sort_item", kwargs={"view_sort_id": sort_1.id}),
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    assert response.status_code == HTTP_404_NOT_FOUND
-    assert response.json()["error"] == "ERROR_VIEW_SORT_DOES_NOT_EXIST"
-
-
-@pytest.mark.django_db
-def test_update_view_sort(api_client, data_fixture):
-    user, token = data_fixture.create_user_and_token()
-    sort_1 = data_fixture.create_view_sort(user=user, order="DESC")
-    sort_2 = data_fixture.create_view_sort()
-    sort_3 = data_fixture.create_view_sort(view=sort_1.view, order="ASC")
-    field_1 = data_fixture.create_text_field(table=sort_1.view.table)
-    link_row_field = data_fixture.create_link_row_field(table=sort_1.view.table)
-    field_2 = data_fixture.create_text_field()
-
-    response = api_client.patch(
-        reverse("api:database:views:sort_item", kwargs={"view_sort_id": sort_2.id}),
-        {"order": "ASC"},
-        format="json",
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    assert response.status_code == HTTP_400_BAD_REQUEST
-    assert response.json()["error"] == "ERROR_USER_NOT_IN_GROUP"
-
-    response = api_client.patch(
-        reverse("api:database:views:sort_item", kwargs={"view_sort_id": 9999}),
-        {"order": "ASC"},
-        format="json",
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    assert response.status_code == HTTP_404_NOT_FOUND
-    assert response.json()["error"] == "ERROR_VIEW_SORT_DOES_NOT_EXIST"
-
-    response = api_client.patch(
-        reverse("api:database:views:sort_item", kwargs={"view_sort_id": sort_1.id}),
-        {
-            "field": 9999999,
-            "order": "EXISTING",
-        },
-        format="json",
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    response_json = response.json()
-    assert response.status_code == HTTP_400_BAD_REQUEST
-    assert response_json["error"] == "ERROR_REQUEST_BODY_VALIDATION"
-    assert response_json["detail"]["field"][0]["code"] == "does_not_exist"
-    assert response_json["detail"]["order"][0]["code"] == "invalid_choice"
-
-    response = api_client.patch(
-        reverse("api:database:views:sort_item", kwargs={"view_sort_id": sort_1.id}),
-        {"field": field_2.id},
-        format="json",
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    response_json = response.json()
-    assert response.status_code == HTTP_400_BAD_REQUEST
-    assert response_json["error"] == "ERROR_FIELD_NOT_IN_TABLE"
-
-    response = api_client.patch(
-        reverse("api:database:views:sort_item", kwargs={"view_sort_id": sort_1.id}),
-        {"field": link_row_field.id},
-        format="json",
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    response_json = response.json()
-    assert response.status_code == HTTP_400_BAD_REQUEST
-    assert response_json["error"] == "ERROR_VIEW_SORT_FIELD_NOT_SUPPORTED"
-
-    response = api_client.patch(
-        reverse("api:database:views:sort_item", kwargs={"view_sort_id": sort_3.id}),
-        {"field": sort_1.field_id},
-        format="json",
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    response_json = response.json()
-    assert response.status_code == HTTP_400_BAD_REQUEST
-    assert response_json["error"] == "ERROR_VIEW_SORT_FIELD_ALREADY_EXISTS"
-
-    response = api_client.patch(
-        reverse("api:database:views:sort_item", kwargs={"view_sort_id": sort_1.id}),
-        {
-            "field": field_1.id,
-            "order": "ASC",
-        },
-        format="json",
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    response_json = response.json()
-    assert response.status_code == HTTP_200_OK
-    assert ViewSort.objects.all().count() == 3
-    first = ViewSort.objects.get(pk=sort_1.id)
-    assert first.field_id == field_1.id
-    assert first.order == "ASC"
-    assert response_json["id"] == first.id
-    assert response_json["view"] == first.view_id
-    assert response_json["field"] == field_1.id
-    assert response_json["order"] == "ASC"
-
-    response = api_client.patch(
-        reverse("api:database:views:sort_item", kwargs={"view_sort_id": sort_1.id}),
-        {"order": "DESC"},
-        format="json",
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    response_json = response.json()
-    assert response.status_code == HTTP_200_OK
-    first = ViewSort.objects.get(pk=sort_1.id)
-    assert first.field_id == field_1.id
-    assert first.order == "DESC"
-    assert response_json["id"] == first.id
-    assert response_json["view"] == first.view_id
-    assert response_json["field"] == field_1.id
-    assert response_json["order"] == "DESC"
-
-    response = api_client.patch(
-        reverse("api:database:views:sort_item", kwargs={"view_sort_id": sort_1.id}),
-        {},
-        format="json",
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    response_json = response.json()
-    assert response.status_code == HTTP_200_OK
-    first = ViewSort.objects.get(pk=sort_1.id)
-    assert first.field_id == field_1.id
-    assert first.order == "DESC"
-    assert response_json["id"] == first.id
-    assert response_json["view"] == first.view_id
-    assert response_json["field"] == field_1.id
-    assert response_json["order"] == "DESC"
-
-
-@pytest.mark.django_db
-def test_delete_view_sort(api_client, data_fixture):
-    user, token = data_fixture.create_user_and_token()
-    sort_1 = data_fixture.create_view_sort(user=user, order="DESC")
-    sort_2 = data_fixture.create_view_sort()
-
-    response = api_client.delete(
-        reverse("api:database:views:sort_item", kwargs={"view_sort_id": sort_2.id}),
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    assert response.status_code == HTTP_400_BAD_REQUEST
-    assert response.json()["error"] == "ERROR_USER_NOT_IN_GROUP"
-
-    response = api_client.delete(
-        reverse("api:database:views:sort_item", kwargs={"view_sort_id": 9999}),
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    assert response.status_code == HTTP_404_NOT_FOUND
-    assert response.json()["error"] == "ERROR_VIEW_SORT_DOES_NOT_EXIST"
-
-    response = api_client.delete(
-        reverse("api:database:views:sort_item", kwargs={"view_sort_id": sort_1.id}),
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-    assert response.status_code == 204
-    assert ViewSort.objects.all().count() == 1
 
 
 @pytest.mark.django_db
@@ -1180,10 +492,30 @@ def test_get_view_field_options(api_client, data_fixture):
     with patch.dict(
         view_type_registry.registry, {"grid": GridViewWithNormalViewModel()}
     ):
+        view_type_registry.get_for_class.cache_clear()
         url = reverse("api:database:views:field_options", kwargs={"view_id": grid.id})
         response = api_client.get(url, **{"HTTP_AUTHORIZATION": f"JWT {token}"})
         assert response.status_code == HTTP_400_BAD_REQUEST
         assert response.json()["error"] == "ERROR_VIEW_DOES_NOT_SUPPORT_FIELD_OPTIONS"
+
+
+@pytest.mark.django_db
+def test_get_view_field_options_as_template(api_client, data_fixture):
+    user, token = data_fixture.create_user_and_token(
+        email="test@test.nl", password="password", first_name="Test1"
+    )
+    table = data_fixture.create_database_table(user=user)
+    grid = data_fixture.create_grid_view(table=table)
+
+    url = reverse("api:database:views:field_options", kwargs={"view_id": grid.id})
+    response = api_client.get(url)
+    assert response.status_code == HTTP_401_UNAUTHORIZED
+
+    data_fixture.create_template(workspace=grid.table.database.workspace)
+    grid.table.database.workspace.has_template.cache_clear()
+    url = reverse("api:database:views:field_options", kwargs={"view_id": grid.id})
+    response = api_client.get(url)
+    assert response.status_code == HTTP_200_OK
 
 
 @pytest.mark.django_db
@@ -1263,3 +595,593 @@ def test_patch_view_field_options(api_client, data_fixture):
         response_json = response.json()
         assert response.status_code == HTTP_400_BAD_REQUEST
         assert response_json["error"] == "ERROR_VIEW_DOES_NOT_SUPPORT_FIELD_OPTIONS"
+
+
+@pytest.mark.django_db
+def test_patch_view_field_options_as_template(api_client, data_fixture):
+    user, token = data_fixture.create_user_and_token(
+        email="test@test.nl", password="password", first_name="Test1"
+    )
+    table = data_fixture.create_database_table(user=user)
+    grid = data_fixture.create_grid_view(table=table)
+
+    url = reverse("api:database:views:field_options", kwargs={"view_id": grid.id})
+    response = api_client.patch(url)
+    assert response.status_code == HTTP_401_UNAUTHORIZED
+
+    data_fixture.create_template(workspace=grid.table.database.workspace)
+    url = reverse("api:database:views:field_options", kwargs={"view_id": grid.id})
+    response = api_client.patch(url)
+    assert response.status_code == HTTP_401_UNAUTHORIZED
+
+
+@override_settings(PERMISSION_MANAGERS=["basic"])
+@pytest.mark.django_db
+def test_patch_view_validate_ownerhip_type_invalid_type(api_client, data_fixture):
+    """A test to make sure that if an invalid `ownership_type` string is passed
+    when updating the view, the `ownership_type` is not updated and this results
+    in status 400 error with an error message.
+    """
+
+    user, token = data_fixture.create_user_and_token()
+    table = data_fixture.create_database_table(user=user)
+    view = data_fixture.create_grid_view(
+        user=user,
+        table=table,
+    )
+
+    previous_ownership_type = view.ownership_type
+    data = {"ownership_type": "NON_EXISTENT"}
+    response = api_client.patch(
+        reverse("api:database:views:item", kwargs={"view_id": view.id}),
+        data,
+        format="json",
+        HTTP_AUTHORIZATION=f"JWT {token}",
+    )
+    response_data = response.json()
+
+    assert response.status_code == HTTP_400_BAD_REQUEST
+    view.refresh_from_db()
+    assert view.ownership_type == previous_ownership_type
+    assert (
+        response_data["detail"]["ownership_type"][0]["error"]
+        == "Ownership type must be one of the above: 'collaborative','personal'."
+    )
+
+
+@pytest.mark.django_db
+def test_rotate_slug(api_client, data_fixture):
+    class UnShareableViewType(GridViewType):
+        can_share = False
+
+    user, token = data_fixture.create_user_and_token()
+    table = data_fixture.create_database_table(user=user)
+    view = data_fixture.create_form_view(table=table)
+    view_2 = data_fixture.create_form_view(public=True)
+    grid_view = data_fixture.create_grid_view(user=user, table=table)
+    old_slug = str(view.slug)
+
+    url = reverse("api:database:views:rotate_slug", kwargs={"view_id": view_2.id})
+    response = api_client.post(url, format="json", HTTP_AUTHORIZATION=f"JWT {token}")
+    assert response.status_code == HTTP_400_BAD_REQUEST
+    assert response.json()["error"] == "ERROR_USER_NOT_IN_GROUP"
+
+    with patch.dict(view_type_registry.registry, {"grid": UnShareableViewType()}):
+        url = reverse(
+            "api:database:views:rotate_slug", kwargs={"view_id": grid_view.id}
+        )
+        response = api_client.post(
+            url, format="json", HTTP_AUTHORIZATION=f"JWT {token}"
+        )
+        assert response.status_code == HTTP_400_BAD_REQUEST
+        assert response.json()["error"] == "ERROR_CANNOT_SHARE_VIEW_TYPE"
+
+    url = reverse("api:database:views:rotate_slug", kwargs={"view_id": 99999})
+    response = api_client.post(url, format="json", HTTP_AUTHORIZATION=f"JWT {token}")
+    assert response.status_code == HTTP_404_NOT_FOUND
+
+    url = reverse("api:database:views:rotate_slug", kwargs={"view_id": view.id})
+    response = api_client.post(
+        url,
+        format="json",
+        HTTP_AUTHORIZATION=f"JWT {token}",
+    )
+    response_json = response.json()
+    assert response.status_code == HTTP_200_OK
+    assert response_json["slug"] != old_slug
+    assert len(response_json["slug"]) == 43
+
+
+@pytest.mark.django_db
+def test_anon_user_cant_get_info_about_a_non_public_view(api_client, data_fixture):
+    user = data_fixture.create_user()
+    grid_view = data_fixture.create_grid_view(user=user, public=False)
+
+    # Get access as an anonymous user
+    response = api_client.get(
+        reverse("api:database:views:public_info", kwargs={"slug": grid_view.slug})
+    )
+    response_json = response.json()
+    assert response.status_code == HTTP_404_NOT_FOUND
+    assert response_json == {
+        "detail": "The requested view does not exist.",
+        "error": "ERROR_VIEW_DOES_NOT_EXIST",
+    }
+
+
+@pytest.mark.django_db
+def test_user_in_wrong_workspace_cant_get_info_about_a_non_public_view(
+    api_client, data_fixture
+):
+    user = data_fixture.create_user()
+    other_user, other_user_token = data_fixture.create_user_and_token()
+    grid_view = data_fixture.create_grid_view(user=user, public=False)
+
+    response = api_client.get(
+        reverse(
+            "api:database:views:public_info",
+            kwargs={"slug": grid_view.slug},
+        ),
+        HTTP_AUTHORIZATION=f"JWT {other_user_token}",
+    )
+    response_json = response.json()
+    assert response.status_code == HTTP_404_NOT_FOUND
+    assert response_json == {
+        "detail": "The requested view does not exist.",
+        "error": "ERROR_VIEW_DOES_NOT_EXIST",
+    }
+
+
+@pytest.mark.django_db
+def test_user_in_same_workspace_can_get_info_about_a_non_public_view(
+    api_client, data_fixture
+):
+    user, token = data_fixture.create_user_and_token()
+    grid_view = data_fixture.create_grid_view(user=user, public=False)
+
+    response = api_client.get(
+        reverse(
+            "api:database:views:public_info",
+            kwargs={"slug": grid_view.slug},
+        ),
+        HTTP_AUTHORIZATION=f"JWT {token}",
+    )
+    response_json = response.json()
+    assert response.status_code == HTTP_200_OK, response_json
+    assert "fields" in response_json
+    assert "view" in response_json
+
+
+@pytest.mark.django_db
+def test_cannot_get_info_about_not_eligibile_view_type(api_client, data_fixture):
+    user = data_fixture.create_user()
+    form_view = data_fixture.create_form_view(user=user, public=True)
+
+    # Get access as an anonymous user
+    response = api_client.get(
+        reverse(
+            "api:database:views:public_info",
+            kwargs={"slug": form_view.slug},
+        ),
+    )
+    response_json = response.json()
+    assert response.status_code == HTTP_404_NOT_FOUND
+    assert response_json == {
+        "detail": "The requested view does not exist.",
+        "error": "ERROR_VIEW_DOES_NOT_EXIST",
+    }
+
+
+@pytest.mark.django_db
+def test_cannot_get_info_about_trashed_view(api_client, data_fixture):
+    user = data_fixture.create_user()
+    grid_view = data_fixture.create_grid_view(user=user, public=True)
+
+    TrashHandler.trash(
+        user,
+        grid_view.table.database.workspace,
+        None,
+        grid_view.table.database.workspace,
+    )
+
+    response = api_client.get(
+        reverse(
+            "api:database:views:public_info",
+            kwargs={"slug": grid_view.slug},
+        ),
+    )
+    response_json = response.json()
+    assert response.status_code == HTTP_404_NOT_FOUND
+    assert response_json == {
+        "detail": "The requested view does not exist.",
+        "error": "ERROR_VIEW_DOES_NOT_EXIST",
+    }
+
+
+@pytest.mark.django_db
+def test_anon_user_cant_get_info_about_a_public_password_protected_view(
+    api_client, data_fixture
+):
+    user, token = data_fixture.create_user_and_token()
+    grid_view = data_fixture.create_grid_view(user=user, public=True)
+
+    # set password for the current view using the API
+    response = api_client.patch(
+        reverse("api:database:views:item", kwargs={"view_id": grid_view.id}),
+        {"public_view_password": "12345678"},
+        format="json",
+        HTTP_AUTHORIZATION=f"JWT {token}",
+    )
+    assert response.status_code == HTTP_200_OK
+
+    # Get access as an anonymous user
+    response = api_client.get(
+        reverse("api:database:views:public_info", kwargs={"slug": grid_view.slug})
+    )
+    assert response.status_code == HTTP_401_UNAUTHORIZED
+    response_json = response.json()
+    public_view_token = response_json.get("access_token", None)
+    assert public_view_token is None
+
+
+@pytest.mark.django_db
+def test_public_view_password_validation(api_client, data_fixture):
+    user, token = data_fixture.create_user_and_token()
+    grid_view = data_fixture.create_grid_view(user=user, public=True)
+
+    # set password for the current view with 8 characters
+    response = api_client.patch(
+        reverse("api:database:views:item", kwargs={"view_id": grid_view.id}),
+        {"public_view_password": "12345678"},
+        format="json",
+        HTTP_AUTHORIZATION=f"JWT {token}",
+    )
+    assert response.status_code == HTTP_200_OK
+
+    # set password for the current view with 256 characters
+    response = api_client.patch(
+        reverse("api:database:views:item", kwargs={"view_id": grid_view.id}),
+        {"public_view_password": "1" * 256},
+        format="json",
+        HTTP_AUTHORIZATION=f"JWT {token}",
+    )
+    assert response.status_code == HTTP_200_OK
+
+    # remove password for the current view
+    response = api_client.patch(
+        reverse("api:database:views:item", kwargs={"view_id": grid_view.id}),
+        {"public_view_password": ""},
+        format="json",
+        HTTP_AUTHORIZATION=f"JWT {token}",
+    )
+    assert response.status_code == HTTP_200_OK
+
+    # attempt setting password with less than 8 characters
+    response = api_client.patch(
+        reverse("api:database:views:item", kwargs={"view_id": grid_view.id}),
+        {"public_view_password": "1234567"},
+        format="json",
+        HTTP_AUTHORIZATION=f"JWT {token}",
+    )
+    assert response.status_code == HTTP_400_BAD_REQUEST
+    response_json = response.json()
+    assert response_json["error"] == "ERROR_REQUEST_BODY_VALIDATION"
+    assert response_json["detail"]["public_view_password"] == [
+        {"code": "min_length", "error": "Ensure this field has at least 8 characters."}
+    ]
+    # attempt setting password more than 256 characters
+    response = api_client.patch(
+        reverse("api:database:views:item", kwargs={"view_id": grid_view.id}),
+        {"public_view_password": "1" * 256},
+        format="json",
+        HTTP_AUTHORIZATION=f"JWT {token}",
+    )
+    assert response.status_code == HTTP_200_OK
+
+    # attempt setting password with more than 256 characters
+    response = api_client.patch(
+        reverse("api:database:views:item", kwargs={"view_id": grid_view.id}),
+        {"public_view_password": "1" * 257},
+        format="json",
+        HTTP_AUTHORIZATION=f"JWT {token}",
+    )
+    assert response.status_code == HTTP_400_BAD_REQUEST
+    response_json = response.json()
+    assert response_json["error"] == "ERROR_REQUEST_BODY_VALIDATION"
+    assert response_json["detail"]["public_view_password"] == [
+        {
+            "code": "max_length",
+            "error": "Ensure this field has no more than 256 characters.",
+        }
+    ]
+
+
+@pytest.mark.django_db
+def test_user_with_invalid_token_cant_get_info_about_a_public_password_protected_view(
+    api_client, data_fixture
+):
+    user = data_fixture.create_user()
+    grid_view = data_fixture.create_public_password_protected_grid_view(
+        user=user, password="12345678"
+    )
+
+    # can't get info about the view
+    response = api_client.get(
+        reverse("api:database:views:public_info", kwargs={"slug": grid_view.slug}),
+        format="json",
+        HTTP_BASEROW_VIEW_AUTHORIZATION=f"JWT token",
+    )
+    assert response.status_code == HTTP_401_UNAUTHORIZED
+
+
+@pytest.mark.django_db
+def test_user_with_password_can_get_info_about_a_public_password_protected_view(
+    api_client, data_fixture
+):
+    user, token = data_fixture.create_user_and_token()
+    password = "12345678"
+    grid_view = data_fixture.create_public_password_protected_grid_view(
+        user=user, password=password
+    )
+
+    # The body of the request must contains a password field
+    response = api_client.post(
+        reverse("api:database:views:public_auth", kwargs={"slug": grid_view.slug}),
+        {"wrong_body_param": password},
+        format="json",
+    )
+    assert response.status_code == HTTP_400_BAD_REQUEST
+    response_json = response.json()
+    assert response_json["error"] == "ERROR_REQUEST_BODY_VALIDATION"
+
+    # Get the authorization token
+    response = api_client.post(
+        reverse("api:database:views:public_auth", kwargs={"slug": grid_view.slug}),
+        {"password": password},
+        format="json",
+    )
+    assert response.status_code == HTTP_200_OK
+    response_json = response.json()
+    public_view_token = response_json.get("access_token", None)
+    assert public_view_token is not None
+
+    # Get access as with the authorization token
+    response = api_client.get(
+        reverse("api:database:views:public_info", kwargs={"slug": grid_view.slug}),
+        format="json",
+        HTTP_BASEROW_VIEW_AUTHORIZATION=f"JWT {public_view_token}",
+    )
+    response_json = response.json()
+    assert response.status_code == HTTP_200_OK
+    assert response_json == {
+        "fields": [],
+        "view": {
+            "id": grid_view.slug,
+            "name": grid_view.name,
+            "order": 0,
+            "public": True,
+            "slug": grid_view.slug,
+            "sortings": [],
+            "group_bys": [],
+            "table": {
+                "database_id": PUBLIC_PLACEHOLDER_ENTITY_ID,
+                "id": PUBLIC_PLACEHOLDER_ENTITY_ID,
+            },
+            "type": "grid",
+            "row_identifier_type": grid_view.row_identifier_type,
+            "row_height_size": grid_view.row_height_size,
+            "show_logo": grid_view.show_logo,
+            "allow_public_export": grid_view.allow_public_export,
+        },
+    }
+
+    # The original user can still access data
+    response = api_client.get(
+        reverse("api:database:views:public_info", kwargs={"slug": grid_view.slug}),
+        format="json",
+        HTTP_AUTHORIZATION=f"JWT {token}",
+    )
+    response_json = response.json()
+    assert response.status_code == HTTP_200_OK
+    assert response_json == {
+        "fields": [],
+        "view": {
+            "id": grid_view.slug,
+            "name": grid_view.name,
+            "order": 0,
+            "public": True,
+            "slug": grid_view.slug,
+            "sortings": [],
+            "group_bys": [],
+            "table": {
+                "database_id": PUBLIC_PLACEHOLDER_ENTITY_ID,
+                "id": PUBLIC_PLACEHOLDER_ENTITY_ID,
+            },
+            "type": "grid",
+            "row_identifier_type": grid_view.row_identifier_type,
+            "row_height_size": grid_view.row_height_size,
+            "show_logo": grid_view.show_logo,
+            "allow_public_export": grid_view.allow_public_export,
+        },
+    }
+
+
+@pytest.mark.django_db
+def test_rotating_slug_of_a_public_password_protected_view_invalidate_previous_tokens(
+    api_client, data_fixture
+):
+    user, token = data_fixture.create_user_and_token()
+    (
+        grid_view,
+        public_view_token,
+    ) = data_fixture.create_public_password_protected_grid_view_with_token(
+        user=user, password="12345678"
+    )
+
+    # rotating slug invalidate previous tokens
+    response = api_client.post(
+        reverse("api:database:views:rotate_slug", kwargs={"view_id": grid_view.id}),
+        format="json",
+        HTTP_AUTHORIZATION=f"JWT {token}",
+    )
+    assert response.status_code == HTTP_200_OK
+    response_json = response.json()
+    assert response_json["id"] == grid_view.id
+    new_slug = response_json["slug"]
+    assert new_slug != grid_view.slug
+
+    # Cannot access data anymore with the initial token
+    response = api_client.get(
+        reverse("api:database:views:public_info", kwargs={"slug": new_slug}),
+        format="json",
+        HTTP_BASEROW_VIEW_AUTHORIZATION=f"JWT {public_view_token}",
+    )
+    assert response.status_code == HTTP_401_UNAUTHORIZED
+
+
+@pytest.mark.django_db
+def test_view_creator_can_always_get_data_of_a_public_password_protected(
+    api_client, data_fixture
+):
+    user, token = data_fixture.create_user_and_token()
+    password = "12345678"
+    grid_view = data_fixture.create_public_password_protected_grid_view(
+        user=user, password=password
+    )
+
+    # anon user cannot access
+    response = api_client.get(
+        reverse("api:database:views:public_info", kwargs={"slug": grid_view.slug}),
+        format="json",
+    )
+    assert response.status_code == HTTP_401_UNAUTHORIZED
+
+    # user in a valid workspace can access data, event without password
+    response = api_client.get(
+        reverse("api:database:views:public_info", kwargs={"slug": grid_view.slug}),
+        format="json",
+        HTTP_AUTHORIZATION=f"JWT {token}",
+    )
+    assert response.status_code == HTTP_200_OK
+
+
+@pytest.mark.django_db
+def test_user_in_wrong_workspace_need_the_password_to_access_password_protected_view(
+    api_client, data_fixture
+):
+    user = data_fixture.create_user()
+    _, other_user_token = data_fixture.create_user_and_token()
+
+    (
+        grid_view,
+        public_view_token,
+    ) = data_fixture.create_public_password_protected_grid_view_with_token(
+        user=user, password="12345678"
+    )
+
+    # user2 cannot access data
+    response = api_client.get(
+        reverse("api:database:views:public_info", kwargs={"slug": grid_view.slug}),
+        format="json",
+        HTTP_AUTHORIZATION=f"JWT {other_user_token}",
+    )
+    assert response.status_code == HTTP_401_UNAUTHORIZED
+
+    # Get access as with the authorization token
+    response = api_client.get(
+        reverse("api:database:views:public_info", kwargs={"slug": grid_view.slug}),
+        format="json",
+        HTTP_BASEROW_VIEW_AUTHORIZATION=f"JWT {public_view_token}",
+        HTTP_AUTHORIZATION=f"JWT {other_user_token}",
+    )
+    assert response.status_code == HTTP_200_OK
+
+
+@pytest.mark.django_db
+def test_public_gallery_view_fields_include_cover_image(api_client, data_fixture):
+    user, token = data_fixture.create_user_and_token()
+    table = data_fixture.create_database_table(user=user)
+    file_field = data_fixture.create_file_field(user=user, table=table)
+    gallery_view = data_fixture.create_gallery_view(
+        user=user, table=table, public=True, card_cover_image_field=file_field
+    )
+    data_fixture.create_gallery_view_field_option(gallery_view, file_field, hidden=True)
+
+    response = api_client.get(
+        reverse("api:database:views:public_info", kwargs={"slug": gallery_view.slug}),
+        format="json",
+        HTTP_AUTHORIZATION=f"JWT {token}",
+    )
+
+    response_json = response.json()
+    assert response.status_code == HTTP_200_OK
+    assert len(response_json["fields"]) == 1
+
+
+@pytest.mark.django_db
+def test_view_cant_update_show_logo(data_fixture, api_client):
+    user, token = data_fixture.create_user_and_token()
+    table = data_fixture.create_database_table(user=user)
+    view = data_fixture.create_grid_view(user=user, table=table, show_logo=True)
+    data = {"show_logo": False}
+
+    response = api_client.patch(
+        reverse("api:database:views:item", kwargs={"view_id": view.id}),
+        data,
+        format="json",
+        HTTP_AUTHORIZATION=f"JWT {token}",
+    )
+
+    view.refresh_from_db()
+    assert view.show_logo is True
+
+    response_data = response.json()
+    assert response_data["show_logo"] is True
+
+
+@pytest.mark.django_db
+def test_view_cant_update_allow_public_export(data_fixture, api_client):
+    user, token = data_fixture.create_user_and_token()
+    table = data_fixture.create_database_table(user=user)
+    view = data_fixture.create_grid_view(
+        user=user, table=table, allow_public_export=False
+    )
+    data = {"allow_public_export": True}
+
+    response = api_client.patch(
+        reverse("api:database:views:item", kwargs={"view_id": view.id}),
+        data,
+        format="json",
+        HTTP_AUTHORIZATION=f"JWT {token}",
+    )
+
+    view.refresh_from_db()
+    assert view.allow_public_export is False
+
+    response_data = response.json()
+    assert response_data["allow_public_export"] is False
+
+
+@pytest.mark.django_db(transaction=True)
+def test_loading_a_sortable_view_will_create_an_index(
+    api_client, data_fixture, enable_singleton_testing
+):
+    user, token = data_fixture.create_user_and_token()
+    table = data_fixture.create_database_table(user=user)
+    text_field = data_fixture.create_text_field(user=user, table=table)
+    grid_view = data_fixture.create_grid_view(user=user, table=table)
+    data_fixture.create_view_sort(view=grid_view, field=text_field, order="ASC")
+
+    table_model = table.get_model()
+    index = ViewIndexingHandler.get_index(grid_view, table_model)
+    assert ViewIndexingHandler.does_index_exist(index.name) is False
+
+    with override_settings(AUTO_INDEX_VIEW_ENABLED=True):
+        response = api_client.get(
+            reverse("api:database:views:grid:list", kwargs={"view_id": grid_view.id}),
+            format="json",
+            HTTP_AUTHORIZATION=f"JWT {token}",
+        )
+        assert response.status_code == HTTP_200_OK
+
+    assert ViewIndexingHandler.does_index_exist(index.name) is True

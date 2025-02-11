@@ -7,35 +7,46 @@
     >
       <div v-show="tableLoading" class="header__loading"></div>
       <ul v-if="!tableLoading" class="header__filter">
+        <li v-if="showLogo" class="header__filter-item">
+          <ExternalLinkBaserowLogo class="header__filter-logo" />
+        </li>
         <li class="header__filter-item header__filter-item--grids">
           <a
             ref="viewsSelectToggle"
             class="header__filter-link"
+            :class="{ 'header__filter-link--disabled': views === null }"
             @click="
-              $refs.viewsContext.toggle(
-                $refs.viewsSelectToggle,
-                'bottom',
-                'left',
-                4
-              )
+              views !== null &&
+                $refs.viewsContext.toggle(
+                  $refs.viewsSelectToggle,
+                  'bottom',
+                  'left',
+                  4
+                )
             "
           >
             <template v-if="hasSelectedView">
               <i
-                class="header__filter-icon header-filter-icon--view fas fa-fw"
-                :class="view._.type.colorClass + ' fa-' + view._.type.iconClass"
+                class="header__filter-icon header-filter-icon--view"
+                :class="`${view._.type.colorClass} ${view._.type.iconClass}`"
               ></i>
               <span class="header__filter-name header__filter-name--forced">
                 <EditableViewName ref="rename" :view="view"></EditableViewName>
               </span>
+              <i
+                v-if="views !== null"
+                class="header__sub-icon iconoir-nav-arrow-down"
+              ></i>
             </template>
-            <span v-else>
-              <i class="header__filter-icon fas fa-caret-square-down"></i>
-              Choose view
-            </span>
+            <template v-else-if="view !== null">
+              {{ $t('table.chooseView') }}
+              <i class="header__sub-icon iconoir-nav-arrow-down"></i>
+            </template>
           </a>
           <ViewsContext
+            v-if="views !== null"
             ref="viewsContext"
+            :database="database"
             :table="table"
             :views="views"
             :read-only="readOnly"
@@ -44,7 +55,7 @@
           ></ViewsContext>
         </li>
         <li
-          v-if="hasSelectedView && !readOnly"
+          v-if="hasSelectedView && !readOnly && showViewContext"
           class="header__filter-item header__filter-item--no-margin-left"
         >
           <a
@@ -58,39 +69,132 @@
               )
             "
           >
-            <i class="header__filter-icon fas fa-ellipsis-h"></i>
+            <i class="header__filter-icon baserow-icon-more-vertical"></i>
           </a>
           <ViewContext
             ref="viewContext"
+            :database="database"
             :view="view"
             :table="table"
             @enable-rename="$refs.rename.edit()"
           >
           </ViewContext>
         </li>
+        <component
+          :is="component"
+          v-for="(component, index) in getAdditionalTableHeaderComponents(
+            view,
+            isPublic
+          )"
+          :key="index"
+          :database="database"
+          :table="table"
+          :view="view"
+          :fields="fields"
+          :is-public-view="isPublic"
+          :store-prefix="storePrefix"
+        >
+        </component>
         <li
-          v-if="hasSelectedView && view._.type.canFilter"
+          v-if="
+            hasSelectedView &&
+            view._.type.canFilter &&
+            (adhocFiltering ||
+              $hasPermission(
+                'database.table.view.create_filter',
+                view,
+                database.workspace.id
+              ))
+          "
           class="header__filter-item"
         >
           <ViewFilter
             :view="view"
+            :is-public-view="isPublic"
             :fields="fields"
-            :primary="primary"
-            :read-only="readOnly"
+            :read-only="adhocFiltering"
+            :disable-filter="disableFilter"
             @changed="refresh()"
           ></ViewFilter>
         </li>
         <li
-          v-if="hasSelectedView && view._.type.canSort"
+          v-if="
+            hasSelectedView &&
+            view._.type.canSort &&
+            (adhocSorting ||
+              $hasPermission(
+                'database.table.view.create_sort',
+                view,
+                database.workspace.id
+              ))
+          "
           class="header__filter-item"
         >
           <ViewSort
             :view="view"
             :fields="fields"
-            :primary="primary"
-            :read-only="readOnly"
+            :read-only="adhocSorting"
+            :disable-sort="disableSort"
             @changed="refresh()"
           ></ViewSort>
+        </li>
+        <li
+          v-if="
+            hasSelectedView &&
+            view._.type.canGroupBy &&
+            (readOnly ||
+              $hasPermission(
+                'database.table.view.create_group_by',
+                view,
+                database.workspace.id
+              ))
+          "
+          class="header__filter-item"
+        >
+          <ViewGroupBy
+            :view="view"
+            :fields="fields"
+            :read-only="readOnly"
+            :disable-group-by="disableGroupBy"
+            @changed="refresh()"
+          ></ViewGroupBy>
+        </li>
+        <li
+          v-if="
+            hasSelectedView &&
+            view._.type.canShare &&
+            !readOnly &&
+            $hasPermission(
+              'database.table.view.update_slug',
+              view,
+              database.workspace.id
+            )
+          "
+          class="header__filter-item"
+        >
+          <ShareViewLink :view="view" :read-only="readOnly"></ShareViewLink>
+        </li>
+        <li
+          v-if="
+            hasCompatibleDecorator &&
+            !readOnly &&
+            $hasPermission(
+              'database.table.view.decoration.update',
+              view,
+              database.workspace.id
+            )
+          "
+          class="header__filter-item"
+        >
+          <ViewDecoratorMenu
+            :database="database"
+            :view="view"
+            :table="table"
+            :fields="fields"
+            :read-only="readOnly"
+            :disable-sort="disableSort"
+            @changed="refresh()"
+          ></ViewDecoratorMenu>
         </li>
       </ul>
       <component
@@ -100,7 +204,6 @@
         :table="table"
         :view="view"
         :fields="fields"
-        :primary="primary"
         :read-only="readOnly"
         :store-prefix="storePrefix"
         @refresh="refresh"
@@ -114,11 +217,20 @@
         :database="database"
         :table="table"
         :view="view"
+        :loading="viewLoading"
         :fields="fields"
-        :primary="primary"
         :read-only="readOnly"
         :store-prefix="storePrefix"
         @refresh="refresh"
+        @selected-row="$emit('selected-row', $event)"
+        @navigate-previous="
+          (row, activeSearchTerm) =>
+            $emit('navigate-previous', row, activeSearchTerm)
+        "
+        @navigate-next="
+          (row, activeSearchTerm) =>
+            $emit('navigate-next', row, activeSearchTerm)
+        "
       />
       <div v-if="viewLoading" class="loading-overlay"></div>
     </div>
@@ -126,6 +238,7 @@
 </template>
 
 <script>
+import { mapGetters } from 'vuex'
 import ResizeObserver from 'resize-observer-polyfill'
 
 import { RefreshCancelledError } from '@baserow/modules/core/errors'
@@ -134,8 +247,12 @@ import ViewsContext from '@baserow/modules/database/components/view/ViewsContext
 import ViewContext from '@baserow/modules/database/components/view/ViewContext'
 import ViewFilter from '@baserow/modules/database/components/view/ViewFilter'
 import ViewSort from '@baserow/modules/database/components/view/ViewSort'
+import ViewDecoratorMenu from '@baserow/modules/database/components/view/ViewDecoratorMenu'
 import ViewSearch from '@baserow/modules/database/components/view/ViewSearch'
 import EditableViewName from '@baserow/modules/database/components/view/EditableViewName'
+import ShareViewLink from '@baserow/modules/database/components/view/ShareViewLink'
+import ExternalLinkBaserowLogo from '@baserow/modules/core/components/ExternalLinkBaserowLogo'
+import ViewGroupBy from '@baserow/modules/database/components/view/ViewGroupBy.vue'
 
 /**
  * This page component is the skeleton for a table. Depending on the selected view it
@@ -143,8 +260,12 @@ import EditableViewName from '@baserow/modules/database/components/view/Editable
  */
 export default {
   components: {
+    ViewGroupBy,
+    ExternalLinkBaserowLogo,
+    ShareViewLink,
     EditableViewName,
     ViewsContext,
+    ViewDecoratorMenu,
     ViewFilter,
     ViewSort,
     ViewSearch,
@@ -170,13 +291,10 @@ export default {
       type: Array,
       required: true,
     },
-    primary: {
-      type: Object,
-      required: true,
-    },
     views: {
-      type: Array,
-      required: true,
+      required: false,
+      validator: (prop) => typeof prop === 'object' || prop === undefined,
+      default: null,
     },
     view: {
       required: true,
@@ -187,6 +305,21 @@ export default {
       required: true,
     },
     readOnly: {
+      type: Boolean,
+      required: false,
+      default: false,
+    },
+    disableFilter: {
+      type: Boolean,
+      required: false,
+      default: false,
+    },
+    disableSort: {
+      type: Boolean,
+      required: false,
+      default: false,
+    },
+    disableGroupBy: {
       type: Boolean,
       required: false,
       default: false,
@@ -217,6 +350,90 @@ export default {
         Object.prototype.hasOwnProperty.call(this.view, '_')
       )
     },
+    hasCompatibleDecorator() {
+      return (
+        this.view !== undefined &&
+        this.$registry
+          .getOrderedList('viewDecorator')
+          .some((deco) => deco.isCompatible(this.view))
+      )
+    },
+    showLogo() {
+      return this.view?.show_logo && this.isPublic
+    },
+    showViewContext() {
+      return (
+        this.$hasPermission(
+          'database.table.run_export',
+          this.table,
+          this.database.workspace.id
+        ) ||
+        this.$hasPermission(
+          'database.table.import_rows',
+          this.table,
+          this.database.workspace.id
+        ) ||
+        this.someViewHasPermission(
+          'database.table.view.duplicate',
+          this.table,
+          this.database.workspace.id
+        ) ||
+        this.someViewHasPermission(
+          'database.table.view.update',
+          this.table,
+          this.database.workspace.id
+        ) ||
+        this.someViewHasPermission(
+          'database.table.view.delete',
+          this.table,
+          this.database.workspace.id
+        ) ||
+        this.$hasPermission(
+          'database.table.create_webhook',
+          this.table,
+          this.database.workspace.id
+        )
+      )
+    },
+    adhocFiltering() {
+      if (this.readOnly) {
+        return true
+      }
+
+      return (
+        this.$hasPermission(
+          'database.table.view.list_filter',
+          this.view,
+          this.database.workspace.id
+        ) &&
+        !this.$hasPermission(
+          'database.table.view.create_filter',
+          this.view,
+          this.database.workspace.id
+        )
+      )
+    },
+    adhocSorting() {
+      if (this.readOnly) {
+        return true
+      }
+
+      return (
+        this.$hasPermission(
+          'database.table.view.list_sort',
+          this.view,
+          this.database.workspace.id
+        ) &&
+        !this.$hasPermission(
+          'database.table.view.create_sort',
+          this.view,
+          this.database.workspace.id
+        )
+      )
+    },
+    ...mapGetters({
+      isPublic: 'page/view/public/getIsPublic',
+    }),
   },
   watch: {
     tableLoading(value) {
@@ -246,6 +463,17 @@ export default {
     getViewHeaderComponent(view) {
       const type = this.$registry.get('view', view.type)
       return type.getHeaderComponent()
+    },
+    getAdditionalTableHeaderComponents(view, isPublic) {
+      const opts = Object.values(this.$registry.getAll('plugin'))
+        .reduce((components, plugin) => {
+          components = components.concat(
+            plugin.getAdditionalTableHeaderComponents(view, isPublic)
+          )
+          return components
+        }, [])
+        .filter((component) => component !== null)
+      return opts
     },
     /**
      * When the window resizes, we want to check if the content of the header is
@@ -286,16 +514,22 @@ export default {
       const includeFieldOptions =
         typeof event === 'object' ? event.includeFieldOptions : false
 
+      const fieldsToRefresh =
+        typeof event === 'object' && event.newField
+          ? [...this.fields, event.newField]
+          : this.fields
+
       this.viewLoading = true
       const type = this.$registry.get('view', this.view.type)
       try {
         await type.refresh(
-          { store: this.$store },
+          { store: this.$store, app: this },
+          this.database,
           this.view,
-          this.fields,
-          this.primary,
+          fieldsToRefresh,
           this.storePrefix,
-          includeFieldOptions
+          includeFieldOptions,
+          event?.sourceEvent
         )
       } catch (error) {
         if (error instanceof RefreshCancelledError) {
@@ -310,6 +544,7 @@ export default {
       }
       if (
         Object.prototype.hasOwnProperty.call(this.$refs, 'view') &&
+        // TODO crash here can't convert undefined to object
         Object.prototype.hasOwnProperty.call(this.$refs.view, 'refresh')
       ) {
         await this.$refs.view.refresh()
@@ -324,6 +559,11 @@ export default {
       this.$nextTick(() => {
         this.viewLoading = false
       })
+    },
+    someViewHasPermission(op) {
+      return this.views.some((v) =>
+        this.$hasPermission(op, v, this.database.workspace.id)
+      )
     },
   },
 }

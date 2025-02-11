@@ -2,7 +2,12 @@
   <span
     ref="editable"
     :contenteditable="editing"
-    :class="{ 'forced-user-select-initial': editing }"
+    :placeholder="placeholder"
+    :class="{
+      'forced-user-select-initial': editing,
+      'whitespace-pre-wrap': multiline,
+      'editable--multi-line': multiline,
+    }"
     @input="update"
     @keydown="keydown"
     @focusout="change"
@@ -20,6 +25,16 @@ export default {
     value: {
       type: String,
       required: true,
+    },
+    placeholder: {
+      type: String,
+      required: false,
+      default: '',
+    },
+    multiline: {
+      type: Boolean,
+      required: false,
+      default: false,
     },
   },
   data() {
@@ -52,10 +67,8 @@ export default {
         // need to see if the scrollLeft must be changed so that we can see the cursor
         // which has been placed at the end.
         const parent = this.$el.parentElement
-        if (parent.scrollWidth > parent.clientWidth) {
-          parent.scrollLeft = parent.scrollWidth - parent.clientWidth
-          parent.classList.add('forced-text-overflow-initial')
-        }
+        parent.scrollLeft = parent.scrollWidth - parent.clientWidth
+        parent.classList.add('forced-text-overflow-initial')
       })
     },
     /**
@@ -93,7 +106,14 @@ export default {
      */
     update(event) {
       const target = event.target
-      const text = target.textContent
+      let text = target.textContent
+
+      if (this.multiline && target.innerText !== undefined) {
+        // textContent doesn't support new lines
+        // so we need innerText in multiline mode
+        text = target.innerText
+      }
+
       this.newValue = text
     },
     /**
@@ -112,7 +132,12 @@ export default {
      * to end the editing and save the value.
      */
     keydown(event) {
-      if (event.keyCode === 13 || event.keyCode === 27) {
+      // Allow users to create new lines with Shift+Enter
+      if (event.key === 'Enter' && event.shiftKey && this.multiline) {
+        return false
+      }
+
+      if (event.key === 'Enter' || event.key === 'Escape') {
         event.preventDefault()
         this.change()
         return false

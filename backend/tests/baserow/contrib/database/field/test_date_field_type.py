@@ -1,36 +1,40 @@
-import pytest
-from pytz import timezone
-from datetime import date
+from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 
 from django.core.exceptions import ValidationError
-from django.utils.timezone import make_aware, datetime, utc
+
+import pytest
+from pytest_unordered import unordered
 
 from baserow.contrib.database.fields.field_types import DateFieldType
-from baserow.contrib.database.fields.models import DateField
 from baserow.contrib.database.fields.handler import FieldHandler
+from baserow.contrib.database.fields.models import DateField
 from baserow.contrib.database.fields.registries import field_type_registry
+from baserow.contrib.database.fields.utils import DeferredForeignKeyUpdater
 from baserow.contrib.database.rows.handler import RowHandler
+from baserow.contrib.database.views.handler import ViewHandler
+from baserow.core.registries import ImportExportConfig
 
 
 @pytest.mark.django_db
 def test_date_field_type_prepare_value(data_fixture):
     d = DateFieldType()
 
-    f = data_fixture.create_date_field(date_include_time=True)
-    amsterdam = timezone("Europe/Amsterdam")
-    utc = timezone("UTC")
-    expected_date = make_aware(datetime(2020, 4, 10, 0, 0, 0), utc)
-    expected_datetime = make_aware(datetime(2020, 4, 10, 12, 30, 30), utc)
+    f = data_fixture.create_date_field(date_include_time=True, date_format="ISO")
+    amsterdam = ZoneInfo("Europe/Amsterdam")
+    utc = timezone.utc
+    expected_date = datetime(2020, 4, 10, 0, 0, 0, tzinfo=utc)
+    expected_datetime = datetime(2020, 4, 10, 12, 30, 30, tzinfo=utc)
 
     with pytest.raises(ValidationError):
         assert d.prepare_value_for_db(f, "TEST")
 
     assert d.prepare_value_for_db(f, None) is None
 
-    unprepared_datetime = make_aware(datetime(2020, 4, 10, 14, 30, 30), amsterdam)
+    unprepared_datetime = datetime(2020, 4, 10, 14, 30, 30, tzinfo=amsterdam)
     assert d.prepare_value_for_db(f, unprepared_datetime) == expected_datetime
 
-    unprepared_datetime = make_aware(datetime(2020, 4, 10, 12, 30, 30), utc)
+    unprepared_datetime = datetime(2020, 4, 10, 12, 30, 30, tzinfo=utc)
     assert d.prepare_value_for_db(f, unprepared_datetime) == expected_datetime
 
     unprepared_datetime = datetime(2020, 4, 10, 12, 30, 30)
@@ -44,19 +48,29 @@ def test_date_field_type_prepare_value(data_fixture):
     assert d.prepare_value_for_db(f, "2020-04-10 12:30:30") == expected_datetime
     assert d.prepare_value_for_db(f, "2020-04-10 00:30:30 PM") == expected_datetime
 
-    f = data_fixture.create_date_field(date_include_time=False)
+    f = data_fixture.create_date_field(date_include_time=False, date_format="ISO")
     expected_date = date(2020, 4, 10)
 
     unprepared_datetime = datetime(2020, 4, 10, 14, 30, 30)
     assert d.prepare_value_for_db(f, unprepared_datetime) == expected_date
 
-    unprepared_datetime = make_aware(datetime(2020, 4, 10, 14, 30, 30), amsterdam)
+    unprepared_datetime = datetime(2020, 4, 10, 14, 30, 30, tzinfo=amsterdam)
     assert d.prepare_value_for_db(f, unprepared_datetime) == expected_date
 
     assert d.prepare_value_for_db(f, "2020-04-10") == expected_date
     assert d.prepare_value_for_db(f, "2020-04-11") != expected_date
     assert d.prepare_value_for_db(f, "2020-04-10 12:30:30") == expected_date
     assert d.prepare_value_for_db(f, "2020-04-10 00:30:30 PM") == expected_date
+    assert d.prepare_value_for_db(f, "2020-04-10T12:30:30.12345") == expected_date
+    assert d.prepare_value_for_db(f, "2020-04-10T12:30:30.12345+02:00") == expected_date
+
+    f = data_fixture.create_date_field(date_include_time=False, date_format="US")
+    assert d.prepare_value_for_db(f, "04/10/2020") == date(2020, 4, 10)
+    assert d.prepare_value_for_db(f, "2020-04-10") == date(2020, 4, 10)
+
+    f = data_fixture.create_date_field(date_include_time=False, date_format="EU")
+    assert d.prepare_value_for_db(f, "04/10/2020") == date(2020, 10, 4)
+    assert d.prepare_value_for_db(f, "2020-04-10") == date(2020, 4, 10)
 
 
 @pytest.mark.django_db
@@ -67,11 +81,10 @@ def test_date_field_type(data_fixture):
     field_handler = FieldHandler()
     row_handler = RowHandler()
 
-    amsterdam = timezone("Europe/Amsterdam")
-    utc = timezone("utc")
+    amsterdam = ZoneInfo("Europe/Amsterdam")
 
     date_field_1 = field_handler.create_field(
-        user=user, table=table, type_name="date", name="Date"
+        user=user, table=table, type_name="date", name="Date", date_format="ISO"
     )
     date_field_2 = field_handler.create_field(
         user=user,
@@ -79,6 +92,7 @@ def test_date_field_type(data_fixture):
         type_name="date",
         name="Datetime",
         date_include_time=True,
+        date_format="ISO",
     )
 
     assert date_field_1.date_include_time is False
@@ -99,17 +113,17 @@ def test_date_field_type(data_fixture):
     )
     row.refresh_from_db()
     assert row.date == date(2020, 4, 1)
-    assert row.datetime == datetime(2020, 4, 1, 12, 30, 30, tzinfo=utc)
+    assert row.datetime == datetime(2020, 4, 1, 12, 30, 30, tzinfo=timezone.utc)
 
     row = row_handler.create_row(
         user=user,
         table=table,
-        values={"datetime": make_aware(datetime(2020, 4, 1, 12, 30, 30), amsterdam)},
+        values={"datetime": datetime(2020, 4, 1, 12, 30, 30, tzinfo=amsterdam)},
         model=model,
     )
     row.refresh_from_db()
     assert row.date is None
-    assert row.datetime == datetime(2020, 4, 1, 10, 30, 30, tzinfo=timezone("UTC"))
+    assert row.datetime == datetime(2020, 4, 1, 10, 30, 30, tzinfo=timezone.utc)
 
     date_field_1 = field_handler.update_field(
         user=user, field=date_field_1, date_include_time=True
@@ -123,13 +137,14 @@ def test_date_field_type(data_fixture):
 
     model = table.get_model(attribute_names=True)
     rows = model.objects.all()
+    row_0, row_1, row_2 = rows
 
-    assert rows[0].date is None
-    assert rows[0].datetime is None
-    assert rows[1].date == datetime(2020, 4, 1, tzinfo=timezone("UTC"))
-    assert rows[1].datetime == date(2020, 4, 1)
-    assert rows[2].date is None
-    assert rows[2].datetime == date(2020, 4, 1)
+    assert row_0.date is None
+    assert row_0.datetime is None
+    assert row_1.date == datetime(2020, 4, 1, tzinfo=timezone.utc)
+    assert row_1.datetime == date(2020, 4, 1)
+    assert row_2.date is None
+    assert row_2.datetime == date(2020, 4, 1)
 
     field_handler.delete_field(user=user, field=date_field_1)
     field_handler.delete_field(user=user, field=date_field_2)
@@ -144,7 +159,7 @@ def test_converting_date_field_value(data_fixture):
 
     field_handler = FieldHandler()
     row_handler = RowHandler()
-    utc = timezone("utc")
+    utc = timezone.utc
 
     date_field_eu = data_fixture.create_text_field(table=table)
     date_field_us = data_fixture.create_text_field(table=table)
@@ -181,9 +196,9 @@ def test_converting_date_field_value(data_fixture):
             f"field_{date_field_eu.id}": "22-7-2021",
             f"field_{date_field_us.id}": "7-22-2021",
             f"field_{date_field_iso.id}": "2021/7/22",
-            f"field_{date_field_eu_12.id}": "22-7-2021 12:45am",
-            f"field_{date_field_us_12.id}": "7-22-2021 12:45am",
-            f"field_{date_field_iso_12.id}": "2021/7/22 12:45am",
+            f"field_{date_field_eu_12.id}": "22-7-2021 12:45 am",
+            f"field_{date_field_us_12.id}": "7-22-2021 12:45 am",
+            f"field_{date_field_iso_12.id}": "2021/7/22 12:45 am",
             f"field_{date_field_eu_24.id}": "22-7-2021 7:45",
             f"field_{date_field_us_24.id}": "7-22-2021 7:45",
             f"field_{date_field_iso_24.id}": "2021/7/22 7:45",
@@ -282,64 +297,65 @@ def test_converting_date_field_value(data_fixture):
 
     model = table.get_model()
     rows = model.objects.all()
+    row_0, row_1, row_2, row_3 = rows
 
-    assert getattr(rows[0], f"field_{date_field_eu.id}") == date(2021, 7, 22)
-    assert getattr(rows[0], f"field_{date_field_us.id}") == date(2021, 7, 22)
-    assert getattr(rows[0], f"field_{date_field_iso.id}") == date(2021, 7, 22)
-    assert getattr(rows[0], f"field_{date_field_eu_12.id}") == (
+    assert getattr(row_0, f"field_{date_field_eu.id}") == date(2021, 7, 22)
+    assert getattr(row_0, f"field_{date_field_us.id}") == date(2021, 7, 22)
+    assert getattr(row_0, f"field_{date_field_iso.id}") == date(2021, 7, 22)
+    assert getattr(row_0, f"field_{date_field_eu_12.id}") == (
         datetime(2021, 7, 22, 12, 45, 0, tzinfo=utc)
     )
-    assert getattr(rows[0], f"field_{date_field_us_12.id}") == (
+    assert getattr(row_0, f"field_{date_field_us_12.id}") == (
         datetime(2021, 7, 22, 12, 45, 0, tzinfo=utc)
     )
-    assert getattr(rows[0], f"field_{date_field_iso_12.id}") == (
+    assert getattr(row_0, f"field_{date_field_iso_12.id}") == (
         datetime(2021, 7, 22, 12, 45, 0, tzinfo=utc)
     )
-    assert getattr(rows[0], f"field_{date_field_eu_24.id}") == (
+    assert getattr(row_0, f"field_{date_field_eu_24.id}") == (
         datetime(2021, 7, 22, 12, 45, 0, tzinfo=utc)
     )
-    assert getattr(rows[0], f"field_{date_field_us_24.id}") == (
+    assert getattr(row_0, f"field_{date_field_us_24.id}") == (
         datetime(2021, 7, 22, 12, 45, 0, tzinfo=utc)
     )
-    assert getattr(rows[0], f"field_{date_field_iso_24.id}") == (
+    assert getattr(row_0, f"field_{date_field_iso_24.id}") == (
         datetime(2021, 7, 22, 12, 45, 0, tzinfo=utc)
-    )
-
-    assert getattr(rows[1], f"field_{date_field_eu.id}") == date(2021, 7, 22)
-    assert getattr(rows[1], f"field_{date_field_us.id}") == date(2021, 7, 22)
-    assert getattr(rows[1], f"field_{date_field_iso.id}") == date(2021, 7, 22)
-    assert getattr(rows[1], f"field_{date_field_eu_12.id}") == (
-        datetime(2021, 7, 22, 0, 45, 0, tzinfo=utc)
-    )
-    assert getattr(rows[1], f"field_{date_field_us_12.id}") == (
-        datetime(2021, 7, 22, 0, 45, 0, tzinfo=utc)
-    )
-    assert getattr(rows[1], f"field_{date_field_iso_12.id}") == (
-        datetime(2021, 7, 22, 0, 45, 0, tzinfo=utc)
-    )
-    assert getattr(rows[1], f"field_{date_field_eu_24.id}") == (
-        datetime(2021, 7, 22, 7, 45, 0, tzinfo=utc)
-    )
-    assert getattr(rows[1], f"field_{date_field_us_24.id}") == (
-        datetime(2021, 7, 22, 7, 45, 0, tzinfo=utc)
-    )
-    assert getattr(rows[1], f"field_{date_field_iso_24.id}") == (
-        datetime(2021, 7, 22, 7, 45, 0, tzinfo=utc)
     )
 
-    assert getattr(rows[2], f"field_{date_field_eu.id}") == date(2021, 7, 22)
-    assert getattr(rows[2], f"field_{date_field_us.id}") == date(2021, 7, 22)
-    assert getattr(rows[2], f"field_{date_field_iso.id}") == date(2021, 7, 22)
-    assert getattr(rows[2], f"field_{date_field_eu_12.id}") is None
-    assert getattr(rows[2], f"field_{date_field_us_12.id}") is None
-    assert getattr(rows[2], f"field_{date_field_iso_12.id}") is None
-    assert getattr(rows[2], f"field_{date_field_eu_24.id}") == (
+    assert getattr(row_1, f"field_{date_field_eu.id}") == date(2021, 7, 22)
+    assert getattr(row_1, f"field_{date_field_us.id}") == date(2021, 7, 22)
+    assert getattr(row_1, f"field_{date_field_iso.id}") == date(2021, 7, 22)
+    assert getattr(row_1, f"field_{date_field_eu_12.id}") == (
+        datetime(2021, 7, 22, 0, 45, 0, tzinfo=utc)
+    )
+    assert getattr(row_1, f"field_{date_field_us_12.id}") == (
+        datetime(2021, 7, 22, 0, 45, 0, tzinfo=utc)
+    )
+    assert getattr(row_1, f"field_{date_field_iso_12.id}") == (
+        datetime(2021, 7, 22, 0, 45, 0, tzinfo=utc)
+    )
+    assert getattr(row_1, f"field_{date_field_eu_24.id}") == (
         datetime(2021, 7, 22, 7, 45, 0, tzinfo=utc)
     )
-    assert getattr(rows[2], f"field_{date_field_us_24.id}") == (
+    assert getattr(row_1, f"field_{date_field_us_24.id}") == (
         datetime(2021, 7, 22, 7, 45, 0, tzinfo=utc)
     )
-    assert getattr(rows[2], f"field_{date_field_iso_24.id}") == (
+    assert getattr(row_1, f"field_{date_field_iso_24.id}") == (
+        datetime(2021, 7, 22, 7, 45, 0, tzinfo=utc)
+    )
+
+    assert getattr(row_2, f"field_{date_field_eu.id}") == date(2021, 7, 22)
+    assert getattr(row_2, f"field_{date_field_us.id}") == date(2021, 7, 22)
+    assert getattr(row_2, f"field_{date_field_iso.id}") == date(2021, 7, 22)
+    assert getattr(row_2, f"field_{date_field_eu_12.id}") is None
+    assert getattr(row_2, f"field_{date_field_us_12.id}") is None
+    assert getattr(row_2, f"field_{date_field_iso_12.id}") is None
+    assert getattr(row_2, f"field_{date_field_eu_24.id}") == (
+        datetime(2021, 7, 22, 7, 45, 0, tzinfo=utc)
+    )
+    assert getattr(row_2, f"field_{date_field_us_24.id}") == (
+        datetime(2021, 7, 22, 7, 45, 0, tzinfo=utc)
+    )
+    assert getattr(row_2, f"field_{date_field_iso_24.id}") == (
         datetime(2021, 7, 22, 7, 45, 0, tzinfo=utc)
     )
 
@@ -355,25 +371,25 @@ def test_converting_date_field_value(data_fixture):
     f'field_{date_field_iso_24.id}': '10-04-19 12:00:17'
     """
 
-    assert getattr(rows[3], f"field_{date_field_eu.id}") == date(2018, 8, 20)
-    assert getattr(rows[3], f"field_{date_field_us.id}") == date(2017, 3, 3)
-    assert getattr(rows[3], f"field_{date_field_iso.id}") == date(2017, 4, 19)
-    assert getattr(rows[3], f"field_{date_field_eu_12.id}") == (
+    assert getattr(row_3, f"field_{date_field_eu.id}") == date(2018, 8, 20)
+    assert getattr(row_3, f"field_{date_field_us.id}") == date(2017, 3, 3)
+    assert getattr(row_3, f"field_{date_field_iso.id}") == date(2017, 4, 19)
+    assert getattr(row_3, f"field_{date_field_eu_12.id}") == (
         datetime(2017, 12, 2, 2, 39, 58, tzinfo=utc)
     )
-    assert getattr(rows[3], f"field_{date_field_us_12.id}") == (
+    assert getattr(row_3, f"field_{date_field_us_12.id}") == (
         datetime(2018, 6, 9, 15, 28, 14, tzinfo=utc)
     )
-    assert getattr(rows[3], f"field_{date_field_iso_12.id}") == (
+    assert getattr(row_3, f"field_{date_field_iso_12.id}") == (
         datetime(2010, 4, 20, 0, 0, 35, tzinfo=utc)
     )
-    assert getattr(rows[3], f"field_{date_field_eu_24.id}") == (
+    assert getattr(row_3, f"field_{date_field_eu_24.id}") == (
         datetime(2010, 4, 20, 0, 0, 35, tzinfo=utc)
     )
-    assert getattr(rows[3], f"field_{date_field_us_24.id}") == (
+    assert getattr(row_3, f"field_{date_field_us_24.id}") == (
         datetime(2018, 2, 27, 15, 35, 20, 311000, tzinfo=utc)
     )
-    assert getattr(rows[3], f"field_{date_field_iso_24.id}") == (
+    assert getattr(row_3, f"field_{date_field_iso_24.id}") == (
         datetime(10, 4, 19, 12, 0, tzinfo=utc)
     )
 
@@ -407,18 +423,19 @@ def test_converting_date_field_value(data_fixture):
 
     model = table.get_model()
     rows = model.objects.all()
+    row_0, _, row_2, _ = rows
 
-    assert getattr(rows[0], f"field_{date_field_eu.id}") == "22/07/2021"
-    assert getattr(rows[0], f"field_{date_field_us.id}") == "07/22/2021"
-    assert getattr(rows[0], f"field_{date_field_iso.id}") == "2021-07-22"
-    assert getattr(rows[0], f"field_{date_field_eu_12.id}") == "22/07/2021 12:45PM"
-    assert getattr(rows[0], f"field_{date_field_us_12.id}") == "07/22/2021 12:45PM"
-    assert getattr(rows[0], f"field_{date_field_iso_12.id}") == "2021-07-22 12:45PM"
-    assert getattr(rows[0], f"field_{date_field_eu_24.id}") == "22/07/2021 12:45"
-    assert getattr(rows[0], f"field_{date_field_us_24.id}") == "07/22/2021 12:45"
-    assert getattr(rows[0], f"field_{date_field_iso_24.id}") == "2021-07-22 12:45"
+    assert getattr(row_0, f"field_{date_field_eu.id}") == "22/07/2021"
+    assert getattr(row_0, f"field_{date_field_us.id}") == "07/22/2021"
+    assert getattr(row_0, f"field_{date_field_iso.id}") == "2021-07-22"
+    assert getattr(row_0, f"field_{date_field_eu_12.id}") == "22/07/2021 12:45 PM"
+    assert getattr(row_0, f"field_{date_field_us_12.id}") == "07/22/2021 12:45 PM"
+    assert getattr(row_0, f"field_{date_field_iso_12.id}") == "2021-07-22 12:45 PM"
+    assert getattr(row_0, f"field_{date_field_eu_24.id}") == "22/07/2021 12:45"
+    assert getattr(row_0, f"field_{date_field_us_24.id}") == "07/22/2021 12:45"
+    assert getattr(row_0, f"field_{date_field_iso_24.id}") == "2021-07-22 12:45"
 
-    assert getattr(rows[2], f"field_{date_field_eu_12.id}") is None
+    assert getattr(row_2, f"field_{date_field_eu_12.id}") is None
 
 
 @pytest.mark.django_db
@@ -504,17 +521,17 @@ def test_negative_date_field_value(data_fixture):
     assert getattr(results[4], f"field_{datetime_field.id}") is None
     assert getattr(results[5], f"field_{date_field.id}") == date(1, 1, 1)
     assert getattr(results[5], f"field_{datetime_field.id}") == (
-        datetime(1, 1, 1, tzinfo=timezone("utc"))
+        datetime(1, 1, 1, tzinfo=timezone.utc)
     )
     assert getattr(results[6], f"field_{date_field.id}") is None
     assert getattr(results[6], f"field_{datetime_field.id}") is None
     assert getattr(results[7], f"field_{date_field.id}") == date(2010, 2, 3)
     assert getattr(results[7], f"field_{datetime_field.id}") == (
-        datetime(2010, 2, 3, 12, 30, 0, tzinfo=timezone("utc"))
+        datetime(2010, 2, 3, 12, 30, 0, tzinfo=timezone.utc)
     )
     assert getattr(results[8], f"field_{date_field.id}") == date(2012, 1, 28)
     assert getattr(results[8], f"field_{datetime_field.id}") == (
-        datetime(2012, 1, 28, 12, 30, 0, tzinfo=timezone("utc"))
+        datetime(2012, 1, 28, 12, 30, 0, tzinfo=timezone.utc)
     )
 
 
@@ -524,7 +541,11 @@ def test_import_export_date_field(data_fixture):
     date_field_type = field_type_registry.get_by_model(date_field)
     number_serialized = date_field_type.export_serialized(date_field)
     number_field_imported = date_field_type.import_serialized(
-        date_field.table, number_serialized, {}
+        date_field.table,
+        number_serialized,
+        ImportExportConfig(include_permission_data=True),
+        {},
+        DeferredForeignKeyUpdater(),
     )
     assert date_field.date_format == number_field_imported.date_format
     assert date_field.date_include_time == number_field_imported.date_include_time
@@ -546,8 +567,8 @@ def test_get_set_export_serialized_value_date_field(data_fixture):
     row_2 = model.objects.create(
         **{
             f"field_{date_field.id}": "2010-02-03",
-            f"field_{datetime_field.id}": make_aware(
-                datetime(2010, 2, 3, 12, 30, 0), utc
+            f"field_{datetime_field.id}": datetime(
+                2010, 2, 3, 12, 30, 0, tzinfo=timezone.utc
             ),
         }
     )
@@ -567,6 +588,7 @@ def test_get_set_export_serialized_value_date_field(data_fixture):
             row_1, date_field_name, {}, None, None
         ),
         {},
+        {},
         None,
         None,
     )
@@ -576,6 +598,7 @@ def test_get_set_export_serialized_value_date_field(data_fixture):
         date_field_type.get_export_serialized_value(
             row_1, datetime_field_name, {}, None, None
         ),
+        {},
         {},
         None,
         None,
@@ -587,6 +610,7 @@ def test_get_set_export_serialized_value_date_field(data_fixture):
             row_2, date_field_name, {}, None, None
         ),
         {},
+        {},
         None,
         None,
     )
@@ -596,6 +620,7 @@ def test_get_set_export_serialized_value_date_field(data_fixture):
         date_field_type.get_export_serialized_value(
             row_2, datetime_field_name, {}, None, None
         ),
+        {},
         {},
         None,
         None,
@@ -608,3 +633,108 @@ def test_get_set_export_serialized_value_date_field(data_fixture):
     assert old_row_1_datetime == getattr(row_1, datetime_field_name)
     assert old_row_2_date == getattr(row_2, date_field_name)
     assert old_row_2_datetime == getattr(row_2, datetime_field_name)
+
+
+@pytest.mark.django_db
+def test_date_field_adjacent_row(data_fixture):
+    user = data_fixture.create_user()
+    table = data_fixture.create_database_table(name="Car", user=user)
+    grid_view = data_fixture.create_grid_view(user=user, table=table, name="Test")
+    date_field = data_fixture.create_date_field(table=table)
+
+    data_fixture.create_view_sort(view=grid_view, field=date_field, order="DESC")
+
+    table_model = table.get_model()
+    handler = RowHandler()
+    [row_a, row_b, row_c] = handler.create_rows(
+        user=user,
+        table=table,
+        rows_values=[
+            {
+                f"field_{date_field.id}": "2010-02-03",
+            },
+            {
+                f"field_{date_field.id}": "2010-02-04",
+            },
+            {
+                f"field_{date_field.id}": "2010-02-05",
+            },
+        ],
+        model=table_model,
+    )
+
+    previous_row = handler.get_adjacent_row(
+        table_model, row_b.id, previous=True, view=grid_view
+    )
+    next_row = handler.get_adjacent_row(table_model, row_b.id, view=grid_view)
+
+    assert previous_row.id == row_c.id
+    assert next_row.id == row_a.id
+
+
+@pytest.mark.django_db
+def test_get_group_by_metadata_in_rows_with_date_field(data_fixture):
+    user = data_fixture.create_user()
+    table = data_fixture.create_database_table(user=user)
+    text_field = data_fixture.create_text_field(
+        table=table, order=0, name="Color", text_default="white"
+    )
+    date_field = data_fixture.create_date_field(table=table, date_include_time=True)
+    handler = RowHandler()
+    [row_empty, row_a, row_b, row_c, row_d] = handler.create_rows(
+        user=user,
+        table=table,
+        rows_values=[
+            {},
+            {
+                f"field_{date_field.id}": "2010-01-01 12:00:21",
+            },
+            {
+                f"field_{date_field.id}": "2010-01-01 12:00:10",
+            },
+            {
+                f"field_{date_field.id}": "2010-01-01 12:01:21",
+            },
+            {
+                f"field_{date_field.id}": "2010-01-02 12:01:21",
+            },
+        ],
+    )
+
+    model = table.get_model()
+
+    queryset = model.objects.all().enhance_by_fields()
+    rows = list(queryset)
+
+    handler = ViewHandler()
+    counts = handler.get_group_by_metadata_in_rows([date_field], rows, queryset)
+
+    # Resolve the queryset, so that we can do a comparison.
+    for c in counts.keys():
+        counts[c] = list(counts[c])
+
+    assert counts == {
+        date_field: unordered(
+            [
+                {
+                    "count": 2,
+                    f"field_{date_field.id}": datetime(
+                        2010, 1, 1, 12, 0, 0, tzinfo=timezone.utc
+                    ),
+                },
+                {
+                    "count": 1,
+                    f"field_{date_field.id}": datetime(
+                        2010, 1, 1, 12, 1, 0, tzinfo=timezone.utc
+                    ),
+                },
+                {
+                    "count": 1,
+                    f"field_{date_field.id}": datetime(
+                        2010, 1, 2, 12, 1, 0, tzinfo=timezone.utc
+                    ),
+                },
+                {"count": 1, f"field_{date_field.id}": None},
+            ]
+        )
+    }

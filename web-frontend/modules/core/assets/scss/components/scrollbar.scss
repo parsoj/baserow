@@ -20,20 +20,19 @@
 %scrollbar {
   background-color: $color-neutral-900;
   opacity: 0.6;
-  border-radius: 3px;
   pointer-events: auto;
   cursor: pointer;
   user-select: none;
+
+  @include rounded($rounded);
 }
 
 .scrollbars__vertical {
   @extend %scrollbar;
-
   @include absolute(auto, 0, auto, 0);
 }
 
 .scrollbars__horizontal {
   @extend %scrollbar;
-
   @include absolute(0, auto, 0, auto);
 }

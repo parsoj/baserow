@@ -1,3 +1,15 @@
+/**
+ * Generates a UUID version 4 (UUID v4) string.
+ *
+ * This function creates a UUID v4 string by using a combination of the current
+ * timestamp and random numbers. While the standard UUID v4 is based on random
+ * numbers, this function uses the timestamp to influence the randomness.
+ *
+ * Note: This method does not produce a traditional time-based UUID (v1) or a
+ * purely random UUID v4, but rather a hybrid.
+ *
+ * @returns {string} - A UUID v4 string
+ */
 export const uuid = function () {
   let dt = new Date().getTime()
   const uuid = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
@@ -6,6 +18,18 @@ export const uuid = function () {
     return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16)
   })
   return uuid
+}
+
+/**
+ * Generate a random string for small UID with low chances of collision.
+ */
+export const smallUID = (length = 5) => {
+  const chars = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
+  let result = ''
+  for (let i = 0; i < length; i++) {
+    result += chars.charAt(Math.floor(Math.random() * chars.length))
+  }
+  return result
 }
 
 export const upperCaseFirst = function (string) {
@@ -35,23 +59,39 @@ export const slugify = (string) => {
     .replace(/-+$/, '') // Trim - from end of text
 }
 
+/**
+ * A very lenient URL validator that allows all types of URL as long as it respects
+ * the maximal amount of characters before the dot at at least have one character
+ * after the dot.
+ */
 export const isValidURL = (str) => {
-  const pattern = new RegExp(
-    '^((https?|ftps?):\\/\\/)?' + // protocol
-      '((([a-z\\d]([a-z\\d-]*[a-z\\d])*)\\.)+[a-z]{2,}|' + // domain name
-      '((\\d{1,3}\\.){3}\\d{1,3}))' + // OR ip (v4) address
-      '(\\:\\d+)?(\\/[-a-z\\d\\*%_.~+]*)*' + // port and path
-      '(\\?[;&a-z\\d%_.~+=-]*)?' + // query string
-      '(\\#[-a-z\\d_]*)?$',
-    'i'
-  ) // fragment locator
+  const pattern = /^[^\s]{0,255}(?:\.|\/\/)[^\s]{1,}$/i
   return !!pattern.test(str)
+}
+
+/**
+ * A slightly stricter URL validator than requires any url begins with a http:// or
+ * https:// and that it also passes the isValidURL validator above.
+ */
+export const isValidURLWithHttpScheme = (str) => {
+  const trimmedStr = str.trim()
+  const pattern = /^https?:\/\//i
+  return !!pattern.test(trimmedStr) && isValidURL(trimmedStr)
+}
+
+/**
+ * An even stricter validator that makes sure that https:// is prepended and that there
+ * is at least a domain name.
+ */
+export const isValidAbsoluteURL = (str) => {
+  const pattern = /^[^\s]{0,255}(\.)[^\s]{2,}$/i
+  return isValidURLWithHttpScheme(str) && pattern.test(str)
 }
 
 export const isValidEmail = (str) => {
   // Please keep these regex in sync with the backend
   // See baserow.contrib.database.fields.field_types.EmailFieldType
-  // Javascript does not support using \w to match unicode letters like python.
+  // JavaScript does not support using \w to match unicode letters like python.
   // Instead we match all unicode letters including ones with modifiers by using the
   // regex \p{L}\p{M}* taken from https://www.regular-expressions.info/unicode.html
   // Unicode Categories section.
@@ -74,6 +114,12 @@ export const isValidEmail = (str) => {
   return !!pattern.test(str)
 }
 
+export const getFilenameFromUrl = (url) => {
+  const pathname = new URL(url).pathname
+  const index = pathname.lastIndexOf('/')
+  return pathname.substring(index + 1) // if index === -1 then index+1 will be 0
+}
+
 // Regex duplicated from
 // src/baserow/contrib/database/fields/field_types.py#PhoneNumberFieldType
 // Docs reference what characters are valid in PhoneNumberFieldType.getDocsDescription
@@ -89,4 +135,72 @@ export const isSecureURL = (str) => {
 
 export const escapeRegExp = (string) => {
   return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+export const isNumeric = (value) => {
+  return /^-?\d+$/.test(value)
+}
+
+/**
+ * Allow to find the next unused name excluding a list of names.
+ * This is the frontend equivalent of backend ".find_unused_name()" method.
+ *
+ * @param {string} baseName
+ * @param {string[]} excludeNames
+ * @returns the first baseName potentially suffixed with a number that is not in
+ * excludedNames.
+ *
+ * @example
+ * // returns 'name'
+ * getNextAvailableNameInSequence('name', []);
+ *
+ * @example
+ * // returns 'name 1'
+ * getNextAvailableNameInSequence('name', ['name']);
+ *
+ * @example
+ * // returns 'name 2'
+ * getNextAvailableNameInSequence('name', ['name', 'name 1', 'name 3']);
+ *
+ * @example
+ * // returns 'name__2'
+ * getNextAvailableNameInSequence('name', ['name', 'name 1', 'name 3'],
+ *   {pattern: (baseName, index) => `${basename}__${index + 1}`});
+ */
+export const getNextAvailableNameInSequence = (
+  baseName,
+  excludeNames,
+  { pattern = (baseName, index) => `${baseName} ${index + 1}` } = {}
+) => {
+  let name = baseName
+  let i = 0
+  while (i < excludeNames.length) {
+    if (!excludeNames.includes(name)) {
+      return name
+    }
+    name = pattern(baseName, i)
+    i++
+  }
+  return name
+}
+
+/**
+ * Checks if a search term is a substring of at least one string within a given list of
+ * strings.
+ *
+ * @param strings
+ * @param searchTerm
+ * @returns boolean
+ */
+export const isSubstringOfStrings = (strings, searchTerm) => {
+  const stringsSanitised = strings.map((s) => s.toLowerCase().trim())
+  const searchTermSanitised = searchTerm.toLowerCase().trim()
+
+  return stringsSanitised.some((s) => s.includes(searchTermSanitised))
+}
+
+export function collatedStringCompare(stringA, stringB, order) {
+  return order === 'ASC'
+    ? stringA.localeCompare(stringB, 'en')
+    : stringB.localeCompare(stringA, 'en')
 }

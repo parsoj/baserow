@@ -43,11 +43,12 @@
 .api-docs__switch {
   padding: 0 10px;
   font-weight: 600;
-  color: $color-primary-900;
-  border-radius: 3px;
+  color: $color-neutral-900;
   user-select: none;
 
   @include fixed-height(32px, 13px);
+  @include rounded($rounded);
+  @include flex-align-items(6px);
 
   &:hover {
     text-decoration: none;
@@ -129,5 +130,38 @@
 }
 
 .api-docs__content {
-  color: $color-primary-900;
+  color: $color-neutral-900;
+
+  &.markdown code {
+    display: inline-block;
+    font-size: 14px;
+    padding: 3px 6px;
+    background-color: $color-neutral-100;
+
+    @include rounded($rounded);
+  }
+
+  &.markdown p {
+    color: $color-neutral-900;
+    margin-bottom: 20px;
+    font-size: 13px;
+    line-height: 140%;
+  }
+
+  &.markdown ul {
+    padding-left: 1em;
+  }
+}
+
+.api-docs__heading-wrapper {
+  display: flex;
+  justify-content: space-between;
+
+  @media screen and (max-width: $api-docs-breakpoint) {
+    display: block;
+  }
+}
+
+.api-docs__endpoint-type {
+  width: 100px;
 }

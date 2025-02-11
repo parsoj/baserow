@@ -1,15 +1,14 @@
-from django.conf.urls import url
+from django.urls import re_path
 
 from .views import ExportJobView, ExportTableView
-
 
 app_name = "baserow.contrib.database.api.export"
 
 urlpatterns = [
-    url(
+    re_path(
         r"table/(?P<table_id>[0-9]+)/$",
         ExportTableView.as_view(),
         name="export_table",
     ),
-    url(r"(?P<job_id>[0-9]+)/$", ExportJobView.as_view(), name="get"),
+    re_path(r"(?P<job_id>[0-9]+)/$", ExportJobView.as_view(), name="get"),
 ]

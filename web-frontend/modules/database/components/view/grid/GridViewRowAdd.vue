@@ -1,14 +1,21 @@
 <template>
-  <div class="grid-view__row" :style="{ width: width + 'px' }">
-    <div class="grid-view__column" :style="{ width: width + 'px' }">
+  <div class="grid-view__row" :style="{ width: width + 'px', height: '33px' }">
+    <div
+      class="grid-view__column"
+      :style="{ width: width + 'px', height: '33px' }"
+    >
       <a
         class="grid-view__add-row"
         :class="{ hover: addHover }"
         @mouseover="setHover(true)"
         @mouseleave="setHover(false)"
-        @click="$emit('add-row')"
+        @click="addRow"
+        @click.right.prevent="addRows"
       >
-        <i v-if="includeRowDetails" class="fas fa-plus"></i>
+        <i
+          v-if="includeRowDetails"
+          class="grid-view__add-row-icon iconoir-plus"
+        ></i>
       </a>
     </div>
   </div>
@@ -23,7 +30,7 @@ export default {
   name: 'GridViewRowAdd',
   mixins: [gridViewHelpers],
   props: {
-    fields: {
+    visibleFields: {
       type: Array,
       required: true,
     },
@@ -34,8 +41,8 @@ export default {
   },
   computed: {
     width() {
-      let width = this.fields.reduce(
-        (value, field) => this.getFieldWidth(field.id) + value,
+      let width = this.visibleFields.reduce(
+        (value, field) => this.getFieldWidth(field) + value,
         0
       )
       if (this.includeRowDetails) {
@@ -56,6 +63,14 @@ export default {
   methods: {
     setHover(value) {
       this.$store.dispatch(this.storePrefix + 'view/grid/setAddRowHover', value)
+    },
+    addRow(event) {
+      event.preventFieldCellUnselect = true
+      this.$emit('add-row')
+    },
+    addRows(event) {
+      event.preventFieldCellUnselect = true
+      this.$emit('add-rows', event)
     },
   },
 }

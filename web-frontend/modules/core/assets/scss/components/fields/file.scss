@@ -1,6 +1,6 @@
 .field-file__list {
   list-style: none;
-  margin: 0 0 20px 0;
+  margin: 0 0 20px;
   padding: 0;
 }
 
@@ -19,12 +19,12 @@
 
 .field-file__icon {
   display: block;
-  border: solid 1px $color-neutral-300;
-  border-radius: 3px;
+  border: solid 1px $color-neutral-400;
   color: $color-neutral-600;
   overflow: hidden;
 
   @include center-text(48px, 22px);
+  @include rounded($rounded);
 
   &:hover {
     text-decoration: none;
@@ -34,6 +34,10 @@
     display: block;
     max-width: 100%;
     max-height: 100%;
+  }
+
+  &--static {
+    cursor: unset;
   }
 }
 
@@ -60,28 +64,28 @@
 }
 
 .field-file__actions {
-  flex: 0 0;
   display: flex;
   margin-left: 16px;
   text-align: right;
   padding-top: 6px;
   font-size: 13px;
   color: $color-success-500;
+  gap: 5px;
 }
 
 .field-file__action {
   position: relative;
   color: $color-neutral-400;
-  border-radius: 3px;
 
   @include center-text(24px, 13px);
+  @include rounded($rounded);
 
   &:not(:last-child) {
     margin-right: 8px;
   }
 
   &:hover {
-    color: $color-primary-900;
+    color: $color-neutral-900;
     background-color: $color-neutral-100;
   }
 }

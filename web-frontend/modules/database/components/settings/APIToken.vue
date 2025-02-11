@@ -23,11 +23,13 @@
               $refs.context.toggle($refs.contextLink, 'bottom', 'right', 4)
             "
           >
-            <i class="fas fa-ellipsis-h"></i>
+            <i class="baserow-icon-more-horizontal"></i>
           </a>
-          <Context ref="context">
+          <Context ref="context" overflow-scroll max-height-if-outside-viewport>
             <div class="api-token__key">
-              <div class="api-token__key-name">Token:</div>
+              <div class="api-token__key-name">
+                {{ $t('apiToken.tokenPrefix') }}
+              </div>
               <div class="api-token__key-value">
                 <template v-if="tokenVisible">
                   {{ token.key }}
@@ -36,70 +38,75 @@
               </div>
               <a
                 class="api-token__key-visible"
-                title="Show or hide the token"
+                :title="$t('apiToken.showOrHide')"
                 @click.prevent="tokenVisible = !tokenVisible"
               >
                 <i
-                  class="fas"
-                  :class="tokenVisible ? 'fa-eye-slash' : 'fa-eye'"
+                  :class="
+                    tokenVisible ? 'iconoir-eye-off' : 'iconoir-eye-empty'
+                  "
                 ></i>
               </a>
               <a
                 class="api-token__key-copy"
-                title="Copy to clipboard"
+                :title="$t('apiToken.copyToClipboard')"
                 @click=";[copyTokenToClipboard(), $refs.copied.show()]"
               >
-                <i class="fas fa-copy"></i>
+                <i class="iconoir-copy"></i>
                 <Copied ref="copied"></Copied>
               </a>
             </div>
             <ul class="context__menu">
-              <li>
-                <nuxt-link :to="{ name: 'database-api-docs' }">
-                  <i class="context__menu-icon fas fa-fw fa-book"></i>
-                  View API documentation
+              <li class="context__menu-item">
+                <nuxt-link
+                  class="context__menu-item-link"
+                  :to="{ name: 'database-api-docs' }"
+                >
+                  <i class="context__menu-item-icon iconoir-book"></i>
+                  {{ $t('apiToken.viewAPIDocs') }}
                 </nuxt-link>
               </li>
-              <li>
+              <li class="context__menu-item">
                 <a
+                  class="context__menu-item-link"
                   :class="{
-                    'context__menu-item--loading': rotateLoading,
+                    'context__menu-item-link--loading': rotateLoading,
                   }"
                   @click="rotateKey(token)"
                 >
-                  <i class="context__menu-icon fas fa-fw fa-recycle"></i>
-                  Generate new token
+                  <i class="context__menu-item-icon iconoir-refresh-double"></i>
+                  {{ $t('apiToken.generateNewToken') }}
                 </a>
               </li>
-              <li>
-                <a @click="enableRename()">
-                  <i class="context__menu-icon fas fa-fw fa-pen"></i>
-                  Rename
+              <li class="context__menu-item">
+                <a class="context__menu-item-link" @click="enableRename()">
+                  <i class="context__menu-item-icon iconoir-edit-pencil"></i>
+                  {{ $t('action.rename') }}
                 </a>
               </li>
-              <li>
+              <li class="context__menu-item">
                 <a
                   :class="{
-                    'context__menu-item--loading': deleteLoading,
+                    'context__menu-item-link--loading': deleteLoading,
                   }"
+                  class="context__menu-item-link"
                   @click.prevent="deleteToken(token)"
                 >
-                  <i class="context__menu-icon fas fa-fw fa-trash"></i>
-                  Delete
+                  <i class="context__menu-item-icon iconoir-bin"></i>
+                  {{ $t('action.delete') }}
                 </a>
               </li>
             </ul>
           </Context>
         </div>
         <div class="api-token__details">
-          <div class="api-token__group">{{ group.name }}</div>
+          <div class="api-token__group">{{ workspace.name }}</div>
           <a class="api-token__expand" @click.prevent="open = !open">
-            show databases
+            {{ $t('apiToken.showDatabases') }}
             <i
-              class="fas"
               :class="{
-                'fa-angle-down': !open,
-                'fa-angle-up': open,
+                'iconoir-nav-arrow-down': !open,
+                'iconoir-nav-arrow-up': open,
               }"
             ></i>
           </a>
@@ -107,14 +114,14 @@
       </div>
       <div class="api-token__permissions">
         <div
-          v-for="operation in operations"
+          v-for="(operationName, operation) in operations"
           :key="operation"
           class="api-token__permission"
         >
-          {{ operation }}
+          <span class="margin-bottom-1">{{ operationName }}</span>
           <SwitchInput
             :value="isActive(operation)"
-            :large="true"
+            small
             @input="toggle(operation, $event)"
           ></SwitchInput>
         </div>
@@ -128,13 +135,13 @@
           </div>
           <div class="api-token__permissions">
             <div
-              v-for="operation in operations"
+              v-for="(operationName, operation) in operations"
               :key="operation"
               class="api-token__permission"
             >
               <SwitchInput
                 :value="isDatabaseActive(database, operation)"
-                :large="true"
+                small
                 @input="toggleDatabase(database, databases, operation, $event)"
               ></SwitchInput>
             </div>
@@ -150,12 +157,19 @@
           </div>
           <div class="api-token__permissions">
             <div
-              v-for="operation in operations"
+              v-for="(operationName, operation) in operations"
               :key="operation"
               class="api-token__permission"
             >
               <Checkbox
-                :value="isTableActive(table, database, operation)"
+                v-if="
+                  $hasPermission(
+                    `database.table.${operation}_row`,
+                    table,
+                    workspace.id
+                  )
+                "
+                :checked="isTableActive(table, database, operation)"
                 @input="
                   toggleTable(table, database, databases, operation, $event)
                 "
@@ -188,19 +202,34 @@ export default {
       deleteLoading: false,
       rotateLoading: false,
       tokenVisible: false,
-      operations: ['create', 'read', 'update', 'delete'],
+      operations: {
+        create: this.$t('apiToken.create'),
+        read: this.$t('apiToken.read'),
+        update: this.$t('apiToken.update'),
+        delete: this.$t('apiToken.delete'),
+      },
     }
   },
   computed: {
-    group() {
-      return this.$store.getters['group/get'](this.token.group)
+    workspace() {
+      return this.$store.getters['workspace/get'](this.token.workspace)
     },
     databases() {
-      return this.$store.getters['application/getAllOfGroup'](
-        this.group
+      return this.$store.getters['application/getAllOfWorkspace'](
+        this.workspace
       ).filter(
         (application) => application.type === DatabaseApplicationType.getType()
       )
+    },
+  },
+  watch: {
+    databases: {
+      handler() {
+        // if databases or tables change, we need to ensure that token permissions
+        // are still valid
+        this.removeInvalidPermissions()
+      },
+      deep: true,
     },
   },
   methods: {
@@ -349,13 +378,49 @@ export default {
       )
     },
     /**
+     * Indicates if the permission refer to a database or table still existent.
+     * This fixes the problem that arises when user deletes a database or table from
+     * another browser tab while this form is opened.
+     * We need to delete the permissions that are pointing to the deleted database
+     * before sending updates to the backend if we want to avoid errors.
+     */
+    removeInvalidPermissions() {
+      const tokenPermissions = JSON.parse(
+        JSON.stringify(this.token.permissions)
+      )
+      for (const [operation, permissions] of Object.entries(tokenPermissions)) {
+        if (!Array.isArray(permissions)) {
+          continue
+        }
+        permissions.forEach((permission) => {
+          if (!this.isPermissionValid(permission)) {
+            const [permType, permId] = permission
+            this.remove(operation, permType, permId)
+          }
+        })
+      }
+    },
+    isPermissionValid(permission) {
+      const databases = this.databases
+      const [permType, permId] = permission
+      if (permType === 'database') {
+        const database = databases.find((database) => database.id === permId)
+        return database !== undefined
+      } else if (permType === 'table') {
+        return databases.find((database) => {
+          const table = database.tables.find((table) => table.id === permId)
+          return table !== undefined
+        })
+      }
+    },
+    /**
      * Changes the token permission state of all databases and tables of the given
      * operation. Also updates the permissions with the backend.
      */
     toggle(operation, value) {
       const oldPermissions = JSON.parse(JSON.stringify(this.token.permissions))
       // We can easily change the value to true or false because the permissions are
-      // now going to be controlled on global (group) level.
+      // now going to be controlled on global (workspace) level.
       this.token.permissions[operation] = value
       this.updateToken(
         this.token,
@@ -367,13 +432,13 @@ export default {
      * Changes the token permission state of a provided database and his tables of the
      * given operation. Also updates the permissions with the backend.
      */
-    toggleDatabase(database, sibblings, operation, value) {
+    toggleDatabase(database, siblings, operation, value) {
       const oldPermissions = JSON.parse(JSON.stringify(this.token.permissions))
 
       // First we want to add all the databases that already have an active state to
       // the permissions because the permissions are not going to controlled on
       // database level.
-      sibblings
+      siblings
         .filter(
           (database) => this.isDatabaseActive(database, operation) === true
         )

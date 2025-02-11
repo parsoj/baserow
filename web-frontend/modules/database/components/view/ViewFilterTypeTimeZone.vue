@@ -1,15 +1,12 @@
 <template>
-  <div class="filters__value-timezone">{{ value }}</div>
+  <div class="filters__value-timezone">{{ getTimezoneAbbr() }}</div>
 </template>
 
 <script>
+import filterTypeDateInput from '@baserow/modules/database/mixins/filterTypeDateInput'
+
 export default {
-  name: 'ViewFilterTypeText',
-  props: {
-    value: {
-      type: String,
-      required: true,
-    },
-  },
+  name: 'ViewFilterTypeTimeZone',
+  mixins: [filterTypeDateInput],
 }
 </script>

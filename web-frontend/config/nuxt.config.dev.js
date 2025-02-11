@@ -14,20 +14,17 @@ export default Object.assign(base(), {
   dev: true,
   build: {
     extend(config, ctx) {
-      if (ctx.isDev && ctx.isClient) {
-        config.module.rules.push({
-          enforce: 'pre',
-          test: /\.(js|vue)$/,
-          loader: 'eslint-loader',
-          exclude: /(node_modules)/,
-        })
+      config.node = { fs: 'empty' }
+      if (ctx.isDev) {
+        config.devtool = ctx.isClient ? 'source-map' : 'inline-source-map'
       }
     },
-
+    babel: { compact: true },
     plugins: [
       new StyleLintPlugin({
         syntax: 'scss',
       }),
     ],
+    transpile: ['axios'],
   },
 })

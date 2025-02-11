@@ -2,25 +2,30 @@
   <form @submit.prevent="submit">
     <div class="row">
       <div class="col col-12">
-        <div class="control">
-          <label class="control__label">Select the view to export:</label>
-          <div class="control__elements">
-            <ExportTableDropdown
-              v-model="values.view_id"
-              :views="views"
-              :loading="loading"
-              @input="values.exporter_type = firstExporterType"
-            ></ExportTableDropdown>
-          </div>
-        </div>
+        <FormGroup
+          v-if="enableViewsDropdown"
+          small-label
+          :label="$t('exportTableForm.viewLabel')"
+          required
+          class="margin-bottom-2"
+        >
+          <ExportTableDropdown
+            v-model="values.view_id"
+            :views="viewsWithExporterTypes"
+            :loading="loading"
+            @input="values.exporter_type = firstExporterType"
+          ></ExportTableDropdown>
+        </FormGroup>
+
         <ExporterTypeChoices
           v-model="values.exporter_type"
           :exporter-types="exporterTypes"
           :loading="loading"
+          :database="database"
+          class="margin-bottom-2"
         ></ExporterTypeChoices>
         <div v-if="$v.values.exporter_type.$error" class="error">
-          No exporter type available please select a different view or entire
-          table.
+          {{ $t('exportTableForm.typeError') }}
         </div>
       </div>
     </div>
@@ -29,7 +34,7 @@
       :loading="loading"
       @values-changed="$emit('values-changed', values)"
     />
-    <slot></slot>
+    <slot :filename="exportFilename"></slot>
   </form>
 </template>
 
@@ -37,6 +42,7 @@
 import { required } from 'vuelidate/lib/validators'
 
 import form from '@baserow/modules/core/mixins/form'
+import viewTypeHasExporterTypes from '@baserow/modules/database/utils/viewTypeHasExporterTypes'
 
 import ExportTableDropdown from '@baserow/modules/database/components/export/ExportTableDropdown'
 import ExporterTypeChoices from '@baserow/modules/database/components/export/ExporterTypeChoices'
@@ -49,6 +55,14 @@ export default {
   },
   mixins: [form],
   props: {
+    database: {
+      type: Object,
+      required: true,
+    },
+    table: {
+      type: Object,
+      required: true,
+    },
     view: {
       type: Object,
       required: false,
@@ -62,6 +76,11 @@ export default {
       type: Boolean,
       required: true,
     },
+    enableViewsDropdown: {
+      type: Boolean,
+      required: false,
+      default: true,
+    },
   },
   data() {
     return {
@@ -72,8 +91,20 @@ export default {
     }
   },
   computed: {
+    viewsWithExporterTypes() {
+      return this.views.filter((view) =>
+        viewTypeHasExporterTypes(view.type, this.$registry)
+      )
+    },
     selectedView() {
       return this.views.find((view) => view.id === this.values.view_id) || null
+    },
+    selectedExporter() {
+      return (
+        this.exporterTypes.find(
+          (exporterType) => exporterType.type === this.values.exporter_type
+        ) || null
+      )
     },
     exporterTypes() {
       const types = Object.values(this.$registry.getAll('exporter'))
@@ -95,9 +126,12 @@ export default {
         return null
       }
 
-      return this.exporterTypes
-        .find((exporterType) => exporterType.type === this.values.exporter_type)
-        .getFormComponent()
+      return this.selectedExporter.getFormComponent()
+    },
+    exportFilename() {
+      return `export - ${this.table.name}${
+        this.selectedView ? ` - ${this.selectedView.name}` : ''
+      }.${this.selectedExporter?.getFileExtension()}`
     },
   },
   created() {

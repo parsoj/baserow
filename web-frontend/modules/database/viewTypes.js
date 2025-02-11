@@ -2,17 +2,30 @@ import { Registerable } from '@baserow/modules/core/registry'
 import ViewForm from '@baserow/modules/database/components/view/ViewForm'
 import GridView from '@baserow/modules/database/components/view/grid/GridView'
 import GridViewHeader from '@baserow/modules/database/components/view/grid/GridViewHeader'
+import GalleryView from '@baserow/modules/database/components/view/gallery/GalleryView'
+import GalleryViewHeader from '@baserow/modules/database/components/view/gallery/GalleryViewHeader'
 import FormView from '@baserow/modules/database/components/view/form/FormView'
 import FormViewHeader from '@baserow/modules/database/components/view/form/FormViewHeader'
+import { FileFieldType } from '@baserow/modules/database/fieldTypes'
+import {
+  filterVisibleFieldsFunction,
+  isAdhocFiltering,
+  isAdhocSorting,
+  newFieldMatchesActiveSearchTerm,
+  sortFieldsByOrderAndIdFunction,
+} from '@baserow/modules/database/utils/view'
+import { clone } from '@baserow/modules/core/utils/object'
+import { getDefaultSearchModeFromEnv } from '@baserow/modules/database/utils/search'
+import { GRID_VIEW_SIZE_TO_ROW_HEIGHT_MAPPING } from '@baserow/modules/database/constants'
 
 export const maxPossibleOrderValue = 32767
 
 export class ViewType extends Registerable {
   /**
-   * The font awesome 5 icon name that is used as convenience for the user to
+   * The icon class name that is used as convenience for the user to
    * recognize certain view types. If you for example want the database
    * icon, you must return 'database' here. This will result in the classname
-   * 'fas fa-database'.
+   * 'iconoir-database'.
    */
   getIconClass() {
     return null
@@ -48,14 +61,37 @@ export class ViewType extends Registerable {
     return true
   }
 
-  constructor() {
-    super()
+  /**
+   * Indicates whether it is possible to group the rows. If true the group by context
+   * menu is added to the header.
+   */
+  canGroupBy() {
+    return false
+  }
+
+  /**
+   * Indicates whether it is possible to share this view via an url publically.
+   */
+  canShare() {
+    return false
+  }
+
+  /**
+   * Indicates whether it is possible to show a modal when clicking on a row.
+   */
+  canShowRowModal() {
+    return false
+  }
+
+  constructor(...args) {
+    super(...args)
     this.type = this.getType()
     this.iconClass = this.getIconClass()
     this.colorClass = this.getColorClass()
-    this.name = this.getName()
     this.canFilter = this.canFilter()
     this.canSort = this.canSort()
+    this.canGroupBy = this.canGroupBy()
+    this.canShare = this.canShare()
 
     if (this.type === null) {
       throw new Error('The type name of a view type must be set.')
@@ -82,7 +118,30 @@ export class ViewType extends Registerable {
    * Should return the component that will actually display the view.
    */
   getComponent() {
-    throw new Error('Not implement error. This view should return a component.')
+    throw new Error(
+      'Not implemented error. This view should return a component.'
+    )
+  }
+
+  /**
+   * Should return a route name that will display the view when it has been
+   * publicly shared.
+   */
+  getPublicRoute() {
+    throw new Error(
+      'Not implemented error. This method should be implemented to return a route' +
+        ' name to a public page where the view can be seen.'
+    )
+  }
+
+  /**
+   * A human readable name of the view type to be used in the ShareViewLink and
+   * related components. For example the link to share to view will have the text:
+   * `Share {this.getSharingLinkName()}`
+   */
+  getSharingLinkName() {
+    const { i18n } = this.app
+    return i18n.t('viewType.sharing.linkName')
   }
 
   /**
@@ -105,6 +164,29 @@ export class ViewType extends Registerable {
   }
 
   /**
+   * Indicates whether of nor the provided table id has this current view type
+   * selected. Because every view type has it's own store, this check can be used to
+   * check if the state of that store has to be updated.
+   */
+  isCurrentView(store, tableId) {
+    const table = store.getters['table/getSelected']
+    const view = store.getters['view/getSelected']
+    return (
+      table.id === tableId &&
+      Object.prototype.hasOwnProperty.call(view, 'type') &&
+      view.type === this.getType()
+    )
+  }
+
+  /**
+   * Returns true if view is already configured to be shared. This may be just
+   * a public flag state or more complex per-view calculation
+   */
+  isShared(view) {
+    return !!view.public
+  }
+
+  /**
    * The fetch method is called inside the asyncData function when the table page
    * loads with a selected view. It is possible to fill some stores serverside here.
    */
@@ -117,13 +199,30 @@ export class ViewType extends Registerable {
    * stay the same if possible. Can throw a RefreshCancelledException when the view
    * wishes to cancel the current refresh call due to a new refresh call.
    */
-  refresh({ store }, view) {}
+  refresh(
+    context,
+    database,
+    view,
+    fields,
+    storePrefix = '',
+    includeFieldOptions = false,
+    sourceEvent = null
+  ) {}
+
+  /**
+   * Should return true if the view must be refreshed when a new field has been
+   * created. This could for example be used to check whether the empty value matches
+   * the active search term.
+   */
+  shouldRefreshWhenFieldCreated(registry, store, field, storePrefix) {
+    return false
+  }
 
   /**
    * Method that is called when a field has been created. This can be useful to
    * maintain data integrity for example to add the field to the grid view store.
    */
-  fieldCreated(context, table, field, fieldType, storePrefix) {}
+  afterFieldCreated(context, table, field, fieldType, storePrefix) {}
 
   /**
    * Method that is called when a field has been restored . This can be useful to
@@ -135,13 +234,13 @@ export class ViewType extends Registerable {
    * Method that is called when a field has been deleted. This can be useful to
    * maintain data integrity.
    */
-  fieldDeleted(context, field, fieldType, storePrefix) {}
+  afterFieldDeleted(context, field, fieldType, storePrefix) {}
 
   /**
    * Method that is called when a field has been changed. This can be useful to
    * maintain data integrity by updating the values.
    */
-  fieldUpdated(context, field, oldField, fieldType, storePrefix) {}
+  afterFieldUpdated(context, field, oldField, fieldType, storePrefix) {}
 
   /**
    * Method that is called when the field options of a view are updated.
@@ -149,25 +248,77 @@ export class ViewType extends Registerable {
   fieldOptionsUpdated(context, view, fieldOptions, storePrefix) {}
 
   /**
+   * Method that is called when the selected view is updated.
+   *
+   * @return  Indicates whether the page should be refreshed. The view is already
+   *          refreshed automatically when the filter type or disabled is updated.
+   */
+  updated(context, view, oldView, storePrefix) {
+    return false
+  }
+
+  /**
    * Event that is called when a row is created from an outside source, so for example
    * via a real time event by another user. It can be used to check if data in an store
    * needs to be updated.
    */
-  rowCreated(context, tableId, fields, primary, values, storePrefix) {}
+  rowCreated(context, tableId, fields, values, metadata, storePrefix) {}
 
   /**
    * Event that is called when a row is updated from an outside source, so for example
    * via a real time event by another user. It can be used to check if data in an store
    * needs to be updated.
    */
-  rowUpdated(context, tableId, fields, primary, row, values, storePrefix) {}
+  rowUpdated(
+    context,
+    tableId,
+    fields,
+    row,
+    values,
+    metadata,
+    updatedFieldIds,
+    storePrefix
+  ) {}
+
+  /**
+   * Event that is called when something went wrong while generating AI values
+   * for a field. This can be used to show an error message to the user.
+   */
+  AIValuesGenerationError(context, tableId, fieldId, rowIds, error) {}
 
   /**
    * Event that is called when a row is deleted from an outside source, so for example
    * via a real time event by another user. It can be used to check if data in an store
    * needs to be updated.
    */
-  rowDeleted(context, tableId, fields, primary, row, storePrefix) {}
+  rowDeleted(context, tableId, fields, row, storePrefix) {}
+
+  /**
+   * Event that is called when a piece of metadata is updated for a particular row.
+   * A function which takes the current metadata value and applies the update is
+   * provided and should be used to calculate and store the new metadata value for the
+   * specified metadata type and row.
+   */
+  async rowMetadataUpdated(
+    { store },
+    tableId,
+    rowId,
+    rowMetadataType,
+    updateFunction,
+    storePrefix = ''
+  ) {
+    if (this.isCurrentView(store, tableId)) {
+      await store.dispatch(
+        storePrefix + 'view/' + this.getType() + '/updateRowMetadata',
+        {
+          tableId,
+          rowId,
+          rowMetadataType,
+          updateFunction,
+        }
+      )
+    }
+  }
 
   /**
    * @return object
@@ -177,10 +328,172 @@ export class ViewType extends Registerable {
       type: this.type,
       iconClass: this.iconClass,
       colorClass: this.colorClass,
-      name: this.name,
+      name: this.getName(),
       canFilter: this.canFilter,
       canSort: this.canSort,
+      canShare: this.canShare,
+      canGroupBy: this.canGroupBy,
     }
+  }
+
+  /**
+   * If the view type is disabled, this text will be visible explaining why.
+   */
+  getDeactivatedText() {}
+
+  /**
+   * When the disabled view type is clicked, this modal will be shown.
+   */
+  getDeactivatedClickModal() {
+    return null
+  }
+
+  /**
+   * Indicates if the view type is disabled.
+   */
+  isDeactivated(workspaceId) {
+    return false
+  }
+
+  /**
+   * Helper function to set a field value to null for all
+   * views of the same type
+   * Used when fields are converted or deleted and should no
+   * longer be set
+   */
+  _setFieldToNull({ rootGetters, dispatch }, field, fieldName) {
+    rootGetters['view/getAll']
+      .filter((view) => view.type === this.type)
+      .forEach((view) => {
+        if (view[fieldName] === field.id) {
+          dispatch(
+            'view/forceUpdate',
+            {
+              view,
+              values: { [fieldName]: null },
+            },
+            { root: true }
+          )
+        }
+      })
+  }
+
+  /**
+   * Helper function to call after the field is created in the table
+   * to set the default field options for the view where the field was created.
+   * This is useful for example when creating a new field in a publicly shared grid
+   * view to make the new field visible, otherwise by default the new field will be
+   * hidden if the view is shared. The default implementation returns null, which
+   * mean that is not necessary to update the field options. Return an object with
+   * the field options to update if necessary.
+   */
+  getInitialFieldOptionsForView(view) {
+    return {
+      hidden: false,
+    }
+  }
+
+  /**
+    ShareView component allows for customization which requires a bit of explaination.
+    ViewType may provide additional components through specific methods which are
+    injected into specific places in ShareViewLink component.
+
+    Below is a draft of placement of those additional components
+
+    # shareview create state #
+
+     +---------------------------------------------------------------------+
+     |                                                                     |
+     |    ${ getSharedViewText() }                                         |
+     |   [share view button] [..getAdditionalCreateShareLinkOptions()]     |
+     |                                                                     |
+     +---------------------------------------------------------------------+
+
+    # shareview shared state #
+
+     +-----------------------------------------------------------------------+
+     |                                                                       |
+     |   this view is currently shared via a private link                    |
+     |  [ share URL                    ]  [ copy ] [ rotate url ]            |
+     |  [ restrict access with password]                                     |
+     |  [ ..getAdditionalShareLinkOPptions()]                                |
+     |                                                                       |
+     [-----------------------------------------------------------------------]
+     [                                                                       ]
+     [    ..getAdditionalSharingSections() shoudl provide                    ]
+     [      whole component. It should be in sync with footer link options   ]
+     [                                                                       ]
+     +-----------------------------------------------------------------------+
+     | [disalbe/enable sharing]  [..getAdditionalDisableSharedLinkOptions()] |
+     +-----------------------------------------------------------------------+
+   */
+
+  /**
+   * Every registered view can display multiple additional public share link options
+   * which will be visible on the share public view context. Those options are added
+   * to a default share link component only.
+   *
+   * Additional sharing sections (which may be visible even if default share link is not)
+   * can be returned from getAdditionalSharingSections
+   */
+  getAdditionalShareLinkOptions() {
+    return []
+  }
+
+  /**
+   * A view type can show additional options (links) in a create shared view
+   * modal. This should return a list of components to display.
+   *
+   * @returns {*[]}
+   */
+  getAdditionalCreateShareLinkOptions() {
+    return []
+  }
+
+  /**
+   * Once a view is shared, additional disable shared link buttons may
+   * be presented in the footer
+   */
+  getAdditionalDisableSharedLinkOptions() {
+    return []
+  }
+
+  /**
+   * Additional share link sections that are added after a default one. This method should
+   * return a list of Vue components. Each component will receive `view` and
+   * should be responsible for checking its visibility.
+   *
+   * In most cases state of components returned from  here should be in sync with state
+   * of components returned by getAdditionalDisableSharedLinkOptions() visible in footer.
+   */
+  getAdditionalSharingSections() {
+    return []
+  }
+
+  /**
+   * Custom translation text to return for Shared View text.
+   *
+   * @returns {null|String}
+   */
+  getSharedViewText() {
+    return this.app.i18n.t('shareViewLink.shareViewText')
+  }
+
+  /**
+   * Indicates whether the view is compatible with a data sync.
+   */
+  isCompatibleWithDataSync(dataSync) {
+    return true
+  }
+
+  getVisibleFieldsInOrder({ $store: store }, fields, view, storePrefix = '') {
+    const fieldOptions =
+      store.getters[
+        storePrefix + 'view/' + this.getType() + '/getAllFieldOptions'
+      ]
+    return fields
+      .filter(filterVisibleFieldsFunction(fieldOptions))
+      .sort(sortFieldsByOrderAndIdFunction(fieldOptions, true))
   }
 }
 
@@ -190,11 +503,16 @@ export class GridViewType extends ViewType {
   }
 
   getIconClass() {
-    return 'th'
+    return 'iconoir-menu'
+  }
+
+  canGroupBy() {
+    return true
   }
 
   getName() {
-    return 'Grid'
+    const { i18n } = this.app
+    return i18n.t('viewType.grid')
   }
 
   getHeaderComponent() {
@@ -205,31 +523,84 @@ export class GridViewType extends ViewType {
     return GridView
   }
 
-  async fetch({ store }, view, fields, primary, storePrefix = '') {
+  canShare() {
+    return true
+  }
+
+  canShowRowModal() {
+    return true
+  }
+
+  getPublicRoute() {
+    return 'database-public-grid-view'
+  }
+
+  async fetch({ store }, database, view, fields, storePrefix = '') {
+    const isPublic = store.getters[storePrefix + 'view/public/getIsPublic']
+    const adhocFiltering = isAdhocFiltering(
+      this.app,
+      database.workspace,
+      view,
+      isPublic
+    )
+    const adhocSorting = isAdhocSorting(
+      this.app,
+      database.workspace,
+      view,
+      isPublic
+    )
+    await store.dispatch(
+      storePrefix + 'view/grid/setRowHeight',
+      GRID_VIEW_SIZE_TO_ROW_HEIGHT_MAPPING[view.row_height_size]
+    )
     await store.dispatch(storePrefix + 'view/grid/fetchInitial', {
       gridId: view.id,
       fields,
-      primary,
+      adhocFiltering,
+      adhocSorting,
     })
+    // The grid view store keeps a copy of the group bys that must only be updated
+    // after the refresh of the page. This is because the group by depends on the rows
+    // being sorted, and this will only be the case after a refresh.
+    await store.dispatch(
+      storePrefix + 'view/grid/updateActiveGroupBys',
+      clone(view.group_bys)
+    )
   }
 
   async refresh(
     { store },
+    database,
     view,
     fields,
-    primary,
     storePrefix = '',
-    includeFieldOptions = false
+    includeFieldOptions = false,
+    sourceEvent = null
   ) {
+    const isPublic = store.getters[storePrefix + 'view/public/getIsPublic']
+    const adhocFiltering = isAdhocFiltering(
+      this.app,
+      database.workspace,
+      view,
+      isPublic
+    )
+    const adhocSorting = isAdhocSorting(
+      this.app,
+      database.workspace,
+      view,
+      isPublic
+    )
     await store.dispatch(storePrefix + 'view/grid/refresh', {
+      view,
       fields,
-      primary,
       includeFieldOptions,
+      adhocFiltering,
+      adhocSorting,
     })
   }
 
   async fieldRestored(
-    { dispatch },
+    { dispatch, rootGetters },
     table,
     selectedView,
     field,
@@ -237,12 +608,33 @@ export class GridViewType extends ViewType {
     storePrefix = ''
   ) {
     // There might be new filters and sorts associated with the restored field,
-    // ensure we fetch them. For now we have to fetch all filters/sorts however in the
-    // future we should instead just fetch them for this particular restored field.
-    await dispatch('view/refreshView', { view: selectedView }, { root: true })
+    // ensure we create them. They will be included on the field data object if present.
+    await dispatch(
+      'view/fieldRestored',
+      { field, fieldType, view: selectedView },
+      { root: true }
+    )
   }
 
-  async fieldCreated({ dispatch }, table, field, fieldType, storePrefix = '') {
+  shouldRefreshWhenFieldCreated(registry, store, field, storePrefix) {
+    const searchTerm =
+      store.getters[storePrefix + 'view/grid/getActiveSearchTerm']
+    const searchMode = getDefaultSearchModeFromEnv(this.app.$config)
+    return newFieldMatchesActiveSearchTerm(
+      searchMode,
+      registry,
+      field,
+      searchTerm
+    )
+  }
+
+  async afterFieldCreated(
+    { dispatch },
+    table,
+    field,
+    fieldType,
+    storePrefix = ''
+  ) {
     const value = fieldType.getEmptyValue(field)
     await dispatch(
       storePrefix + 'view/grid/addField',
@@ -259,13 +651,15 @@ export class GridViewType extends ViewType {
           width: 200,
           hidden: false,
           order: maxPossibleOrderValue,
+          aggregation_type: '',
+          aggregation_raw_type: '',
         },
       },
       { root: true }
     )
   }
 
-  async fieldDeleted({ dispatch }, field, fieldType, storePrefix = '') {
+  async afterFieldDeleted({ dispatch }, field, fieldType, storePrefix = '') {
     await dispatch(
       storePrefix + 'view/grid/forceDeleteFieldOptions',
       field.id,
@@ -275,7 +669,7 @@ export class GridViewType extends ViewType {
     )
   }
 
-  async fieldUpdated(
+  async afterFieldUpdated(
     { dispatch, rootGetters },
     field,
     oldField,
@@ -290,8 +684,17 @@ export class GridViewType extends ViewType {
       storePrefix + 'view/grid/updateSearch',
       {
         fields: rootGetters['field/getAll'],
-        primary: rootGetters['field/getPrimary'],
       },
+      {
+        root: true,
+      }
+    )
+    // If a field is updated, it can happen that the group by was deleted because
+    // it's not compatible anymore. This will make sure that's also reflected in the
+    // active group bys.
+    await dispatch(
+      storePrefix + 'view/grid/updateActiveGroupBys',
+      clone(rootGetters['view/getSelected'].group_bys),
       {
         root: true,
       }
@@ -308,35 +711,27 @@ export class GridViewType extends ViewType {
     )
   }
 
-  isCurrentView(store, tableId) {
-    const table = store.getters['table/getSelected']
-    const grid = store.getters['view/getSelected']
-    return (
-      table.id === tableId &&
-      Object.prototype.hasOwnProperty.call(grid, 'type') &&
-      grid.type === GridViewType.getType()
-    )
-  }
-
   async rowCreated(
     { store },
     tableId,
     fields,
-    primary,
     values,
+    metadata,
     storePrefix = ''
   ) {
     if (this.isCurrentView(store, tableId)) {
       await store.dispatch(storePrefix + 'view/grid/createdNewRow', {
         view: store.getters['view/getSelected'],
         fields,
-        primary,
         values,
+        metadata,
       })
       await store.dispatch(storePrefix + 'view/grid/fetchByScrollTopDelayed', {
         scrollTop: store.getters[storePrefix + 'view/grid/getScrollTop'],
         fields,
-        primary,
+      })
+      store.dispatch(storePrefix + 'view/grid/fetchAllFieldAggregationData', {
+        view: store.getters['view/getSelected'],
       })
     }
   }
@@ -345,41 +740,382 @@ export class GridViewType extends ViewType {
     { store },
     tableId,
     fields,
-    primary,
     row,
     values,
+    metadata,
+    updatedFieldIds,
     storePrefix = ''
   ) {
     if (this.isCurrentView(store, tableId)) {
       await store.dispatch(storePrefix + 'view/grid/updatedExistingRow', {
         view: store.getters['view/getSelected'],
         fields,
-        primary,
         row,
         values,
+        metadata,
+        updatedFieldIds,
       })
       await store.dispatch(storePrefix + 'view/grid/fetchByScrollTopDelayed', {
         scrollTop: store.getters[storePrefix + 'view/grid/getScrollTop'],
         fields,
-        primary,
+      })
+      store.dispatch(storePrefix + 'view/grid/fetchAllFieldAggregationData', {
+        view: store.getters['view/getSelected'],
       })
     }
   }
 
-  async rowDeleted({ store }, tableId, fields, primary, row, storePrefix = '') {
+  async rowDeleted({ store }, tableId, fields, row, storePrefix = '') {
     if (this.isCurrentView(store, tableId)) {
       await store.dispatch(storePrefix + 'view/grid/deletedExistingRow', {
         view: store.getters['view/getSelected'],
         fields,
-        primary,
         row,
       })
       await store.dispatch(storePrefix + 'view/grid/fetchByScrollTopDelayed', {
         scrollTop: store.getters[storePrefix + 'view/grid/getScrollTop'],
         fields,
-        primary,
+      })
+      store.dispatch(storePrefix + 'view/grid/fetchAllFieldAggregationData', {
+        view: store.getters['view/getSelected'],
       })
     }
+  }
+
+  AIValuesGenerationError(
+    context,
+    tableId,
+    fieldId,
+    rowIds,
+    error,
+    storePrefix = ''
+  ) {
+    if (this.isCurrentView(context.store, tableId)) {
+      context.store.dispatch(
+        storePrefix + 'view/grid/AIValuesGenerationError',
+        {
+          fieldId,
+          rowIds,
+          error,
+        },
+        { root: true }
+      )
+    }
+  }
+}
+
+/**
+ * This class can be used if the view store uses the `bufferedRows` mixin. It will
+ * enable real time collaboration and will make sure that the rows are in the store
+ * are updated properly.
+ */
+export const BaseBufferedRowViewTypeMixin = (Base) =>
+  class extends Base {
+    getDefaultFieldOptionValues() {
+      return {}
+    }
+
+    /**
+     * If the view settings are not correct, this function will prevent fetching the
+     * rows, to prevent unnecessary requests that are going to fail anyway.
+     */
+    canFetch(context, database, view, fields) {
+      return true
+    }
+
+    async fetch(context, database, view, fields, storePrefix = '') {
+      const { store } = context
+      if (!this.canFetch(context, database, view, fields)) {
+        // Set the viewId so the refresh will work when the view can fetch rows.
+        await store.dispatch(`${storePrefix}view/${this.getType()}/setViewId`, {
+          viewId: view.id,
+        })
+        return
+      }
+      const isPublic = store.getters[storePrefix + 'view/public/getIsPublic']
+      const adhocFiltering = isAdhocFiltering(
+        this.app,
+        database.workspace,
+        view,
+        isPublic
+      )
+      const adhocSorting = isAdhocSorting(
+        this.app,
+        database.workspace,
+        view,
+        isPublic
+      )
+      await store.dispatch(
+        `${storePrefix}view/${this.getType()}/fetchInitial`,
+        {
+          viewId: view.id,
+          fields,
+          adhocFiltering,
+          adhocSorting,
+        }
+      )
+    }
+
+    async refresh(
+      context,
+      database,
+      view,
+      fields,
+      storePrefix = '',
+      includeFieldOptions = false,
+      sourceEvent = null
+    ) {
+      const { store } = context
+      if (!this.canFetch(context, database, view, fields)) {
+        return
+      }
+      const isPublic = store.getters[storePrefix + 'view/public/getIsPublic']
+      const adhocFiltering = isAdhocFiltering(
+        this.app,
+        database.workspace,
+        view,
+        isPublic
+      )
+      const adhocSorting = isAdhocSorting(
+        this.app,
+        database.workspace,
+        view,
+        isPublic
+      )
+      await store.dispatch(
+        storePrefix + 'view/' + this.getType() + '/refresh',
+        {
+          fields,
+          includeFieldOptions,
+          adhocFiltering,
+          adhocSorting,
+        }
+      )
+    }
+
+    async fieldRestored(
+      { dispatch },
+      table,
+      selectedView,
+      field,
+      fieldType,
+      storePrefix = ''
+    ) {
+      // There might be new filters and sorts associated with the restored field,
+      // ensure we create them. They will be included on the field data object if present.
+      await dispatch(
+        'view/fieldRestored',
+        { field, fieldType, view: selectedView },
+        { root: true }
+      )
+    }
+
+    shouldRefreshWhenFieldCreated(registry, store, field, storePrefix) {
+      const searchTerm =
+        store.getters[
+          storePrefix + 'view/' + this.getType() + '/getActiveSearchTerm'
+        ]
+      const searchMode = getDefaultSearchModeFromEnv(this.app.$config)
+      return newFieldMatchesActiveSearchTerm(
+        searchMode,
+        registry,
+        field,
+        searchTerm
+      )
+    }
+
+    async afterFieldCreated(
+      { dispatch },
+      table,
+      field,
+      fieldType,
+      storePrefix = ''
+    ) {
+      const value = fieldType.getEmptyValue(field)
+      await dispatch(
+        storePrefix + 'view/' + this.getType() + '/addField',
+        { field, value },
+        { root: true }
+      )
+      await dispatch(
+        storePrefix + 'view/' + this.getType() + '/setFieldOptionsOfField',
+        {
+          field,
+          values: this.getDefaultFieldOptionValues(),
+        },
+        { root: true }
+      )
+    }
+
+    async afterFieldDeleted({ dispatch }, field, fieldType, storePrefix = '') {
+      await dispatch(
+        storePrefix + 'view/' + this.getType() + '/forceDeleteFieldOptions',
+        field.id,
+        {
+          root: true,
+        }
+      )
+    }
+
+    async fieldOptionsUpdated({ store }, view, fieldOptions, storePrefix) {
+      await store.dispatch(
+        storePrefix + 'view/' + this.getType() + '/forceUpdateAllFieldOptions',
+        fieldOptions,
+        {
+          root: true,
+        }
+      )
+    }
+
+    async rowCreated(
+      { store },
+      tableId,
+      fields,
+      values,
+      metadata,
+      storePrefix = ''
+    ) {
+      if (this.isCurrentView(store, tableId)) {
+        await store.dispatch(
+          storePrefix + 'view/' + this.getType() + '/afterNewRowCreated',
+          {
+            view: store.getters['view/getSelected'],
+            fields,
+            values,
+          }
+        )
+      }
+    }
+
+    async rowUpdated(
+      { store },
+      tableId,
+      fields,
+      row,
+      values,
+      metadata,
+      updatedFieldIds,
+      storePrefix = ''
+    ) {
+      if (this.isCurrentView(store, tableId)) {
+        await store.dispatch(
+          storePrefix + 'view/' + this.getType() + '/afterExistingRowUpdated',
+          {
+            view: store.getters['view/getSelected'],
+            fields,
+            row,
+            values,
+          }
+        )
+      }
+    }
+
+    async rowDeleted({ store }, tableId, fields, row, storePrefix = '') {
+      if (this.isCurrentView(store, tableId)) {
+        await store.dispatch(
+          storePrefix + 'view/' + this.getType() + '/afterExistingRowDeleted',
+          {
+            view: store.getters['view/getSelected'],
+            fields,
+            row,
+          }
+        )
+      }
+    }
+  }
+
+export class GalleryViewType extends BaseBufferedRowViewTypeMixin(ViewType) {
+  static getType() {
+    return 'gallery'
+  }
+
+  getIconClass() {
+    return 'baserow-icon-gallery'
+  }
+
+  getColorClass() {
+    return 'color-error'
+  }
+
+  getName() {
+    const { i18n } = this.app
+    return i18n.t('viewType.gallery')
+  }
+
+  getHeaderComponent() {
+    return GalleryViewHeader
+  }
+
+  getComponent() {
+    return GalleryView
+  }
+
+  canShare() {
+    return true
+  }
+
+  canShowRowModal() {
+    return true
+  }
+
+  getPublicRoute() {
+    return 'database-public-gallery-view'
+  }
+
+  getDefaultFieldOptionValues() {
+    // The default values should be the same as in the `GalleryViewFieldOptions`
+    // model in the backend to stay consistent.
+    return {
+      hidden: true,
+      order: maxPossibleOrderValue,
+    }
+  }
+
+  async afterFieldUpdated(
+    { dispatch, rootGetters },
+    field,
+    oldField,
+    fieldType,
+    storePrefix
+  ) {
+    // If the field type has changed from a file field to something else, it could
+    // be that there are gallery views that depending on that field. So we need to
+    // change to type to null if that's the case.
+    const type = FileFieldType.getType()
+    if (oldField.type === type && field.type !== type) {
+      this._setFieldToNull(
+        { dispatch, rootGetters },
+        field,
+        'card_cover_image_field'
+      )
+    }
+    // The field changing may change which cells in the field should be highlighted so
+    // we refresh them to ensure that they still correctly match. E.g. changing a date
+    // fields date_format needs a search update as search string might no longer
+    // match the new format.
+    await dispatch(
+      storePrefix + 'view/gallery/updateSearch',
+      {
+        fields: rootGetters['field/getAll'],
+      },
+      {
+        root: true,
+      }
+    )
+  }
+
+  async afterFieldDeleted(context, field, fieldType, storePrefix = '') {
+    // We want to loop over all gallery views that we have in the store and check if
+    // they were depending on this deleted field. If that's case, we can set it to null
+    // because it doesn't exist anymore.
+    this._setFieldToNull(context, field, 'card_cover_image_field')
+    await context.dispatch(
+      storePrefix + 'view/' + this.getType() + '/forceDeleteFieldOptions',
+      field.id,
+      {
+        root: true,
+      }
+    )
   }
 }
 
@@ -389,7 +1125,7 @@ export class FormViewType extends ViewType {
   }
 
   getIconClass() {
-    return 'edit'
+    return 'baserow-icon-form'
   }
 
   getColorClass() {
@@ -397,7 +1133,8 @@ export class FormViewType extends ViewType {
   }
 
   getName() {
-    return 'Form'
+    const { i18n } = this.app
+    return i18n.t('viewType.form')
   }
 
   canFilter() {
@@ -406,6 +1143,19 @@ export class FormViewType extends ViewType {
 
   canSort() {
     return false
+  }
+
+  canShare() {
+    return true
+  }
+
+  getPublicRoute() {
+    return 'database-table-form'
+  }
+
+  getSharingLinkName() {
+    const { i18n } = this.app
+    return i18n.t('viewType.sharing.formLinkName')
   }
 
   getHeaderComponent() {
@@ -418,18 +1168,25 @@ export class FormViewType extends ViewType {
 
   async refresh(
     { store },
+    database,
     view,
     fields,
-    primary,
     storePrefix = '',
-    includeFieldOptions = false
+    includeFieldOptions = false,
+    sourceEvent = null
   ) {
     await store.dispatch(storePrefix + 'view/form/fetchInitial', {
       formId: view.id,
     })
   }
 
-  async fieldCreated({ dispatch }, table, field, fieldType, storePrefix = '') {
+  async afterFieldCreated(
+    { dispatch },
+    table,
+    field,
+    fieldType,
+    storePrefix = ''
+  ) {
     await dispatch(
       storePrefix + 'view/form/setFieldOptionsOfField',
       {
@@ -442,13 +1199,17 @@ export class FormViewType extends ViewType {
           enabled: false,
           required: true,
           order: maxPossibleOrderValue,
+          show_when_matching_conditions: false,
+          condition_type: 'AND',
+          conditions: [],
+          field_component: 'default',
         },
       },
       { root: true }
     )
   }
 
-  async fieldDeleted({ dispatch }, field, fieldType, storePrefix = '') {
+  async afterFieldDeleted({ dispatch }, field, fieldType, storePrefix = '') {
     await dispatch(
       storePrefix + 'view/form/forceDeleteFieldOptions',
       field.id,
@@ -456,7 +1217,7 @@ export class FormViewType extends ViewType {
     )
   }
 
-  async fetch({ store }, view, fields, primary, storePrefix = '') {
+  async fetch({ store }, database, view, fields, storePrefix = '') {
     await store.dispatch(storePrefix + 'view/form/fetchInitial', {
       formId: view.id,
     })
@@ -467,5 +1228,17 @@ export class FormViewType extends ViewType {
       storePrefix + 'view/form/forceUpdateAllFieldOptions',
       fieldOptions
     )
+  }
+
+  getInitialFieldOptionsForView(view) {
+    return null
+  }
+
+  /**
+   * It's not possible to create rows in a data sync table, so there is no point in
+   * letting the user create one.
+   */
+  isCompatibleWithDataSync(dataSync) {
+    return !dataSync
   }
 }

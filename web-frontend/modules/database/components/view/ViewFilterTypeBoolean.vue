@@ -1,28 +1,22 @@
 <template>
-  <Checkbox :value="copy" :disabled="readOnly" @input="input($event)">
-    Selected
+  <Checkbox :checked="copy" :disabled="disabled" @input="input($event)">
+    {{ $t('viewFilterTypeBoolean.selected') }}
   </Checkbox>
 </template>
 
 <script>
-import { trueString } from '@baserow/modules/database/utils/constants'
+import { trueValues } from '@baserow/modules/core/utils/constants'
+import viewFilter from '@baserow/modules/database/mixins/viewFilter'
 
 export default {
   name: 'ViewFilterTypeBoolean',
-  props: {
-    value: {
-      type: String,
-      required: true,
-    },
-    readOnly: {
-      type: Boolean,
-      required: true,
-    },
-  },
+  mixins: [viewFilter],
   computed: {
     copy() {
-      const value = this.value.toLowerCase().trim()
-      return trueString.includes(value)
+      const value = String(this.filter.value ?? '')
+        .toLowerCase()
+        .trim()
+      return trueValues.includes(value)
     },
   },
   methods: {

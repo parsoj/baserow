@@ -1,19 +1,37 @@
 <template>
   <div class="form-view">
     <FormViewSidebar
+      :database="database"
       :table="table"
       :view="view"
       :fields="disabledFields"
       :enabled-fields="enabledFields"
-      :read-only="readOnly"
+      :all-fields-in-table="fields"
+      :read-only="
+        readOnly ||
+        !$hasPermission(
+          'database.table.view.update_field_options',
+          view,
+          database.workspace.id
+        )
+      "
       :store-prefix="storePrefix"
       @ordered-fields="orderFields"
+      @refresh="$emit('refresh', $event)"
     ></FormViewSidebar>
     <FormViewPreview
+      :database="database"
       :table="table"
       :view="view"
       :fields="enabledFields"
-      :read-only="readOnly"
+      :read-only="
+        readOnly ||
+        !$hasPermission(
+          'database.table.view.update',
+          view,
+          database.workspace.id
+        )
+      "
       :store-prefix="storePrefix"
       @ordered-fields="orderFields"
     ></FormViewPreview>
@@ -32,10 +50,6 @@ export default {
   components: { FormViewSidebar, FormViewPreview },
   mixins: [formViewHelpers],
   props: {
-    primary: {
-      type: Object,
-      required: true,
-    },
     fields: {
       type: Array,
       required: true,
@@ -60,7 +74,6 @@ export default {
   computed: {
     sortedFields() {
       const fields = this.fields.slice()
-      fields.unshift(this.primary)
       return fields.sort((a, b) => {
         const orderA = this.getFieldOption(a.id, 'order', maxPossibleOrderValue)
         const orderB = this.getFieldOption(b.id, 'order', maxPossibleOrderValue)
@@ -84,12 +97,16 @@ export default {
     },
     disabledFields() {
       return this.sortedFields.filter((field) => {
-        return !this.getFieldOption(field.id, 'enabled', false)
+        return (
+          !this.getFieldOption(field.id, 'enabled', false) || field.read_only
+        )
       })
     },
     enabledFields() {
       return this.sortedFields.filter((field) => {
-        return this.getFieldOption(field.id, 'enabled', false)
+        return (
+          this.getFieldOption(field.id, 'enabled', false) && !field.read_only
+        )
       })
     },
   },
